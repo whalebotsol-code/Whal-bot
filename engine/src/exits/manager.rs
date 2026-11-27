@@ -349,19 +349,28 @@ impl ExitEngine {
         !self.positions.is_empty()
     }
 
-    /// O(N<=5) lookup of an open confirmed position whose token creator matches `signer` (0-block Dev-Dump Exit).
+    /// Updates the live on-chain raw token balance for a tracked position (used by Dev-Dump, Max-5 cap, and manual sells).
     #[inline]
-    pub fn find_by_creator(&self, signer: &PubkeyBytes) -> Option<ManagedPosition> {
-        if self.positions.is_empty() {
-            return None;
+    pub fn set_token_balance(&self, mint: &PubkeyBytes, raw_balance: u64) {
+        if let Some(mut pos) = self.positions.get_mut(mint) {
+            pos.token_balance = raw_balance;
         }
+    }
+
+    /// O(N<=5) lookup of all open confirmed positions whose creator/KOL matches `signer` (0-block Dev-Dump / Mirrored KOL Exit).
+    #[inline]
+    pub fn find_by_creator(&self, signer: &PubkeyBytes) -> Vec<ManagedPosition> {
+        if self.positions.is_empty() {
+            return Vec::new();
+        }
+        let mut out = Vec::new();
         for entry in self.positions.iter() {
             let p = entry.value();
             if p.token_balance > 0 && p.creator.as_ref() == Some(signer) {
-                return Some(p.clone());
+                out.push(p.clone());
             }
         }
-        None
+        out
     }
 
     pub fn remove_position(&self, mint: &PubkeyBytes) {

@@ -179,13 +179,13 @@ fn read_u64(data: &[u8], off: usize) -> Option<u64> {
 
 fn read_borsh_string(data: &[u8], off: &mut usize) -> Option<String> {
     let len = u32::from_le_bytes(data.get(*off..*off + 4)?.try_into().ok()?) as usize;
-    *off += 4;
-    if len > 256 || *off + len > data.len() {
+    let start = *off + 4;
+    let end = start.checked_add(len)?;
+    if end > data.len() {
         return None;
     }
-    let s = core::str::from_utf8(&data[*off..*off + len]).ok()?.to_string();
-    *off += len;
-    Some(s)
+    *off = end;
+    Some(String::from_utf8_lossy(&data[start..end]).into_owned())
 }
 
 struct ParsedBuy {
@@ -495,6 +495,35 @@ impl SignalDetector {
                         buy_size_lamports = kol.buy_size_lamports,
                         "LocalShred 0-block KOL buy detected (direct)"
                     );
+                    // Normalize direct Pump.fun V2/V3 KOL buys ([2] == WSOL) into the exact 18-account classic layout
+                    let dex_accounts = if buy.venue == Venue::PumpFun
+                        && buy.ix_accounts.get(2) == Some(&WSOL_MINT)
+                    {
+                        let is_t22 = buy.ix_accounts.get(3) == Some(&crate::executor::TOKEN_2022_PROGRAM_ID)
+                            || buy.ix_accounts.contains(&crate::executor::TOKEN_2022_PROGRAM_ID);
+                        let is_mayhem = buy.ix_accounts.contains(&PUMP_FEE_MAYHEM);
+                        let mut norm = build_local_pumpfun_buy_accounts(
+                            buy.mint,
+                            buy.pool_pda,
+                            kol.pubkey,
+                            is_t22,
+                            is_mayhem,
+                            &[],
+                        );
+                        if let Some(&abc) = buy.ix_accounts.get(6) {
+                            if abc != [0u8; 32] {
+                                norm[4] = abc;
+                            }
+                        }
+                        if let Some(&cv) = buy.ix_accounts.get(10) {
+                            if cv != [0u8; 32] {
+                                norm[9] = cv;
+                            }
+                        }
+                        norm
+                    } else {
+                        buy.ix_accounts
+                    };
                     out.push(TriggerEvent {
                         opportunity_key,
                         strategy_id,
@@ -504,7 +533,7 @@ impl SignalDetector {
                         mint: buy.mint,
                         quote_mint: buy.quote_mint,
                         pool_pda: buy.pool_pda,
-                        dex_accounts: buy.ix_accounts,
+                        dex_accounts,
                         kind: TriggerKind::KolBuy {
                             kol_id: kol.id.clone(),
                             kol_wallet: kol.pubkey,

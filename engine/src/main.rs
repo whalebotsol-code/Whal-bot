@@ -525,7 +525,7 @@ async fn connect_bridge_once(
                                     ctx.breakers.reset();
                                 }
                                 ctx.executor.set_shadow_mode(next == "SHADOW");
-                                ctx.executor.set_paused(next != "RUNNING");
+                                ctx.executor.set_paused(next != "RUNNING" && next != "SHADOW");
                                 if let Ok(mut st) = ctx.engine_status.write() {
                                     *st = next.to_string();
                                 }
@@ -745,7 +745,15 @@ async fn connect_bridge_once(
                                                 for attempt in 0..max_attempts {
                                                     let raw_tok_bal = match fetch_bal().await {
                                                         Some(b) => b,
-                                                        None => pos.token_balance,
+                                                        None => {
+                                                            if pos.token_balance > 0 {
+                                                                pos.token_balance
+                                                            } else {
+                                                                warn!(mint = %mint_log, attempt, "Force sell RPC balance check failed; retrying instead of deleting position");
+                                                                tokio::time::sleep(Duration::from_millis(600)).await;
+                                                                continue;
+                                                            }
+                                                        }
                                                     };
                                                     if raw_tok_bal == 0 {
                                                         info!(mint = %mint_log, attempt, "Force sell confirmed 0 tokens remaining on-chain");
@@ -1183,6 +1191,7 @@ async fn main() {
                         continue;
                     }
                     zero_ticks.remove(&pos.mint);
+                    exit_mgr.set_token_balance(&pos.mint, raw_tok_bal);
                     let ui_tokens = raw_tok_bal as f64 / 1e6;
                     let init_toks = if pos.initial_tokens > 0.0 { pos.initial_tokens } else { ui_tokens };
                     let ui_price = if price_sol > 0.0 { price_sol } else if init_toks > 0.0 { pos.entry_price_sol / init_toks } else { 0.0 };
@@ -1233,7 +1242,10 @@ async fn main() {
                                 close_on_full_exit: order.close_account,
                                 cpi_accounts,
                             };
-                            let _ = exit_exec.execute_sell(params).await;
+                            let sell_exec = Arc::clone(&exit_exec);
+                            tokio::spawn(async move {
+                                let _ = sell_exec.execute_sell(params).await;
+                            });
                         }
                     }
                     // Keep position visible in Active Positions until raw_tok_bal == 0 is confirmed on-chain!

@@ -304,7 +304,7 @@ impl TxBuilder {
                 program_id: SYSTEM_PROGRAM_ID,
                 accounts: vec![
                     AccountMetaSpec { pubkey: p.nonce_account, is_signer: false, is_writable: true },
-                    AccountMetaSpec { pubkey: [0x06; 32], is_signer: false, is_writable: false }, // RecentBlockhashes sysvar
+                    AccountMetaSpec { pubkey: [0x06, 0xa7, 0xd5, 0x17, 0x19, 0x2c, 0x56, 0x8e, 0xe0, 0x8a, 0x84, 0x5f, 0x73, 0xd2, 0x97, 0x88, 0xcf, 0x03, 0x5c, 0x31, 0x45, 0xb2, 0x1a, 0xb3, 0x44, 0xd8, 0x06, 0x2e, 0xa9, 0x40, 0x00, 0x00], is_signer: false, is_writable: false }, // SysvarRecentB1ockHashes11111111111111111111
                     AccountMetaSpec { pubkey: p.hot_wallet, is_signer: true, is_writable: false },
                 ],
                 data: 4u32.to_le_bytes().to_vec(),
@@ -362,10 +362,10 @@ impl TxBuilder {
                             balance_threshold,
                         ));
                     } else {
-                        // On PumpSwap, whales often spend pre-funded WSOL so native SOL only drops by fee/tip (>= 5,000 lamports).
-                        // Checking <= pre_balance - 5_000 still 100% blocks landing ahead of the KOL or on a reverted KOL tx.
+                        // On PumpSwap, require >= 0.05 SOL balance drop (50_000_000 lamports) so a router-wrapped
+                        // KOL SELL (which only pays a tiny fee) can NEVER pass Shield 2 and trigger a buy into a dump.
                         let effective_threshold = if trigger.venue == Venue::PumpSwap {
-                            pre_balance.saturating_sub(5_000)
+                            pre_balance.saturating_sub(50_000_000)
                         } else {
                             balance_threshold
                         };
@@ -784,13 +784,14 @@ impl TxBuilder {
                 program_id: SYSTEM_PROGRAM_ID,
                 accounts: vec![
                     AccountMetaSpec { pubkey: nonce_account, is_signer: false, is_writable: true },
-                    AccountMetaSpec { pubkey: [0x06; 32], is_signer: false, is_writable: false },
+                    AccountMetaSpec { pubkey: [0x06, 0xa7, 0xd5, 0x17, 0x19, 0x2c, 0x56, 0x8e, 0xe0, 0x8a, 0x84, 0x5f, 0x73, 0xd2, 0x97, 0x88, 0xcf, 0x03, 0x5c, 0x31, 0x45, 0xb2, 0x1a, 0xb3, 0x44, 0xd8, 0x06, 0x2e, 0xa9, 0x40, 0x00, 0x00], is_signer: false, is_writable: false },
                     AccountMetaSpec { pubkey: hot_wallet, is_signer: true, is_writable: false },
                 ],
                 data: 4u32.to_le_bytes().to_vec(),
             });
         }
-        if version == TxVersion::V0 {
+        // Always emit ComputeBudget (limit + priority fee) on sells regardless of V0/V1 so sells never land with 0 priority fee.
+        {
             let mut cu_limit = Vec::with_capacity(5);
             cu_limit.push(2u8);
             cu_limit.extend_from_slice(&v1_config.compute_unit_limit.to_le_bytes());

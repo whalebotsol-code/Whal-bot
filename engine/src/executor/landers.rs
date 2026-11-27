@@ -249,7 +249,7 @@ impl LanderFanOut {
                 // - When buy_slot_ttl > 0: 50/50 split -> first half Tier A (Slot +0, max_tip),
                 //   second half Tier B (Slot +0..+ttl, min_tip) with a +60ms micro-stagger on the final
                 //   variant per lander to eliminate Custom(3012) "faster than dev" misses (~92-96% fill rate).
-                let is_tier_a = buy_slot_ttl == 0 || (lander.fanout >= 2 && idx < (lander.fanout + 1) / 2);
+                let is_tier_a = buy_slot_ttl == 0 || lander.fanout <= 1 || idx < (lander.fanout + 1) / 2;
                 let variant_ttl = if is_tier_a { 0 } else { buy_slot_ttl.clamp(1, 4) };
                 let tip_lamports = if is_tier_a {
                     lander.max_tip_lamports

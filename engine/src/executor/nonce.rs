@@ -72,9 +72,10 @@ impl NoncePool {
             .unwrap_or_default()
     }
 
-    /// Returns the next ready durable nonce account in lock-free round-robin order.
+    /// Claims the next ready durable nonce account in round-robin order and marks it in-flight
+    /// (`ready = false`) until the RPC sync task observes its advanced hash.
     pub fn next_ready(&self) -> Option<NonceAccount> {
-        let guard = self.accounts.read().ok()?;
+        let mut guard = self.accounts.write().ok()?;
         let len = guard.len();
         if len == 0 {
             return None;
@@ -83,6 +84,7 @@ impl NoncePool {
         for offset in 0..len {
             let idx = (start + offset) % len;
             if guard[idx].ready {
+                guard[idx].ready = false;
                 return Some(guard[idx].clone());
             }
         }

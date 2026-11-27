@@ -61,12 +61,16 @@ pub fn spawn_alt_cache_loader(rpc_url: String) {
                 "method": "getMultipleAccounts",
                 "params": [keys, { "encoding": "base64", "commitment": "confirmed" }]
             });
+            let pending = ALT_PENDING.get_or_init(DashSet::new);
+            let mut fetched_ok = false;
             if let Ok(resp) = http.post(&rpc_url).json(&req_body).send().await {
                 if let Ok(body) = resp.json::<serde_json::Value>().await {
                     if let Some(vals) = body.pointer("/result/value").and_then(|v| v.as_array()) {
+                        fetched_ok = true;
                         let cache = ALT_CACHE.get_or_init(DashMap::new);
                         for (i, acc) in vals.iter().enumerate() {
                             let Some(&alt_pk) = to_fetch.get(i) else { continue };
+                            let mut inserted = false;
                             if let Some(b64) = acc.pointer("/data/0").and_then(|v| v.as_str()) {
                                 if let Ok(buf) = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, b64) {
                                     if buf.len() >= 56 {
@@ -81,12 +85,21 @@ pub fn spawn_alt_cache_loader(rpc_url: String) {
                                                 cache.clear();
                                             }
                                             cache.insert(alt_pk, addrs);
+                                            inserted = true;
                                         }
                                     }
                                 }
                             }
+                            if !inserted {
+                                pending.remove(&alt_pk);
+                            }
                         }
                     }
+                }
+            }
+            if !fetched_ok {
+                for pk in &to_fetch {
+                    pending.remove(pk);
                 }
             }
         }
@@ -100,8 +113,9 @@ fn request_alt_if_missing(alt_pk: PubkeyBytes) {
         pending.clear();
     }
     if pending.insert(alt_pk) {
-        if let Some(tx) = ALT_FETCH_TX.get() {
-            let _ = tx.try_send(alt_pk);
+        let sent = ALT_FETCH_TX.get().map(|tx| tx.try_send(alt_pk).is_ok()).unwrap_or(false);
+        if !sent {
+            pending.remove(&alt_pk);
         }
     }
 }
@@ -187,10 +201,11 @@ impl ShredStreamIngestor {
                     const DISC_SELL_V2: [u8; 8] = [0x5d, 0xf6, 0x82, 0x3c, 0xe7, 0xe9, 0x40, 0xb2];
                     const DISC_SELL_V3: [u8; 8] = [0x1c, 0x92, 0xde, 0x77, 0x26, 0xc4, 0x69, 0xd5];
                     for signer in &tx.signers {
-                        if let Some(pos) = exits.find_by_creator(signer) {
+                        for pos in exits.find_by_creator(signer) {
                             let is_direct_sell = tx.instructions.iter().any(|ix| {
                                 (ix.program_id == super::detector::PUMPFUN_PROGRAM_ID
                                     || ix.program_id == super::detector::PUMPSWAP_PROGRAM_ID)
+                                    && ix.accounts.contains(&pos.mint)
                                     && ix.data.len() >= 8
                                     && matches!(
                                         &ix.data[0..8],
