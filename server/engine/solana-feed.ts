@@ -496,8 +496,10 @@ export class SolanaLiveFeed {
           }
           if (this.watchedKolKeys.has(msg.traderPublicKey)) {
             const kol = this.cp.snapshot().kols.find((k) => k.pubkey === msg.traderPublicKey);
-            this.cp.dispatchLiveMirrorSell(msg.mint, kol?.label ?? 'KOL');
-            return;
+            if (kol && livePos.kolId === kol.id) {
+              this.cp.dispatchLiveMirrorSell(msg.mint, kol.label);
+              return;
+            }
           }
         }
       }
@@ -1277,7 +1279,9 @@ export class SolanaLiveFeed {
               this.closePaperPosition(mint, `Mirrored KOL sell (${kolForExit.label})`);
             }
             if (this.cp.engineStatus === 'RUNNING') {
-              const liveHeld = this.cp.snapshot().positions.find((p) => !p.id.startsWith('paper_') && p.mint === mint);
+              const liveHeld = this.cp.snapshot().positions.find(
+                (p) => !p.id.startsWith('paper_') && p.mint === mint && p.kolId === kolForExit.id,
+              );
               if (liveHeld) {
                 this.cp.dispatchLiveMirrorSell(mint, kolForExit.label);
               }
@@ -1306,9 +1310,17 @@ export class SolanaLiveFeed {
         ...(tx.transaction?.message?.instructions ?? []),
         ...(tx.meta.innerInstructions ?? []).flatMap((g) => g.instructions ?? []),
       ];
-      const dexIx = [...allKolIx].reverse().find(
-        (ix) => ix.programId && Array.isArray(ix.accounts) && ix.accounts.length >= 10 && DEX_PROGRAM_VENUES.some(([pid]) => pid === ix.programId),
-      );
+      const dexIx = [...allKolIx].reverse().find((ix) => {
+        if (!ix.programId || !Array.isArray(ix.accounts)) return false;
+        if (ix.programId === PUMPFUN_PROGRAM) {
+          // Only accept classic Pump.fun layout ([2] === boughtMint); V2/V3 ([2] === WSOL) falls through to 18-acc builder.
+          return ix.accounts.length >= 16 && ix.accounts[2] === boughtMint;
+        }
+        if (ix.programId === 'pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA') {
+          return ix.accounts.length >= 17 && ix.accounts[3] === boughtMint;
+        }
+        return false;
+      });
       const dexAccounts = dexIx?.accounts ? [...dexIx.accounts] : [];
       if (dexIx?.programId === PUMPFUN_PROGRAM && dexAccounts.length > 13) {
         const userVolPda = deriveUserVolumeAccumulator(this.cp.configState().config.wallets.hot_wallet_pubkey);

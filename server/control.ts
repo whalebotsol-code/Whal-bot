@@ -51,6 +51,8 @@ type Breaker = 'hourly_burn' | 'hot_wallet_ceiling' | 'engine_disconnected';
 
 export class ControlPlane extends EventEmitter {
   private rt: EngineRuntime | null = null;
+  private savedPaperPositions: Position[] = [];
+  private savedSession: EngineRuntime['session'] | null = null;
   private liveChain = { slot: 0, shredLatencyMs: 0, nonces: { ready: 0, total: 0 }, ring: { used: 0, size: 64 } };
   private liveBalances = { sol: 0, wsol: 0, usdc: 0, solUsd: 0 };
   private cfg: { version: number; config: BotConfig; updatedAt: number };
@@ -171,9 +173,11 @@ export class ControlPlane extends EventEmitter {
     const want = this.db.listKols();
     for (const k of rt?.kols ?? []) if (!want.some((w) => w.id === k.id)) await this.engine.command({ type: 'kol.remove', id: k.id }).catch(() => {});
     for (const k of want) await this.engine.command({ type: 'kol.upsert', kol: k }).catch(() => {});
-    // Preserve existing paper positions & live status across bridge reconnects so stale initial snapshot never clobbers them.
-    const prevPaperPositions = (this.rt?.positions ?? []).filter((p) => p.id.startsWith('paper_'));
-    const prevSession = this.rt?.session;
+    // Preserve existing paper positions & live status across bridge reconnects (including across disconnect -> reconnect).
+    const prevPaperPositions = this.savedPaperPositions.length > 0
+      ? this.savedPaperPositions
+      : (this.rt?.positions ?? []).filter((p) => p.id.startsWith('paper_'));
+    const prevSession = this.savedSession ?? this.rt?.session ?? null;
     // Auto-restore persisted engine mode (SHADOW or RUNNING) across restarts/redeploys so deploys never leave the bot stuck PAUSED.
     const savedMode = this.db.getMeta('engine_mode');
     const restoredMode = (savedMode === 'SHADOW' || savedMode === 'RUNNING') && rt?.engine.status === 'PAUSED' ? savedMode : null;
@@ -197,6 +201,8 @@ export class ControlPlane extends EventEmitter {
       }
     }
     this.rt = freshRt;
+    this.savedPaperPositions = [];
+    this.savedSession = null;
     // Persist the engine's recent history (first run: simulator backfill).
     if (this.rt) {
       this.db.tx(() => {
@@ -210,8 +216,25 @@ export class ControlPlane extends EventEmitter {
   // ---------- engine events ----------
   private onEngine(e: AdapterEvent) {
     const rt = this.rt;
-    if (e.type === 'connected') { this.rt = this.engine.runtime(); this.tripped.delete('engine_disconnected'); return; }
+    if (e.type === 'connected') {
+      const next = this.engine.runtime();
+      if (next) {
+        if (this.savedPaperPositions.length > 0) {
+          next.positions = [...next.positions.filter((p) => !p.id.startsWith('paper_')), ...this.savedPaperPositions];
+        }
+        if (this.savedSession) next.session = this.savedSession;
+        if (this.liveBalances.sol > 0 || this.liveBalances.solUsd > 0) {
+          next.balances = { ...next.balances, ...this.liveBalances };
+        }
+      }
+      this.rt = next;
+      this.tripped.delete('engine_disconnected');
+      return;
+    }
     if (e.type === 'disconnected') {
+      const papers = (this.rt?.positions ?? []).filter((p) => p.id.startsWith('paper_'));
+      if (papers.length > 0) this.savedPaperPositions = papers;
+      if (this.rt?.session) this.savedSession = this.rt.session;
       this.rt = null;
       this.trip('engine_disconnected', `Engine connection lost: ${e.reason}`);
       this.publish({ type: 'engine_status', ts: Date.now(), status: 'PAUSED', reason: 'Engine disconnected', source: 'disconnected' });
