@@ -58,6 +58,7 @@ pub const DISC_LAUNCHLAB_BUY_EXACT_IN: [u8; 8] = [0xfa, 0xea, 0x0d, 0x7b, 0xd5, 
 pub const DISC_LAUNCHLAB_INITIALIZE: [u8; 8] = [0xaf, 0xaf, 0x6d, 0x1f, 0x0d, 0x98, 0x9b, 0xed];
 
 // Verified 2026 mainnet Pump.fun static accounts for 0.1ms zero-RPC 18-account LocalShred Buy builder.
+const PUMPSWAP_GLOBAL_CONFIG: PubkeyBytes = [0x89, 0x0b, 0xa6, 0x44, 0xfe, 0x1f, 0x55, 0xaa, 0x19, 0xf1, 0x1c, 0xd2, 0xd2, 0xec, 0x14, 0xd3, 0x23, 0x3b, 0x6e, 0x0a, 0x4b, 0xea, 0xee, 0xf7, 0x2b, 0x69, 0x85, 0x8e, 0x21, 0xe1, 0x70, 0xd6];
 const PUMP_GLOBAL: PubkeyBytes = [0x3a, 0x86, 0x5e, 0x69, 0xee, 0x0f, 0x54, 0x80, 0xca, 0xbc, 0xf6, 0x63, 0x57, 0xe4, 0xdc, 0x2f, 0x18, 0xd5, 0x8d, 0x45, 0xc1, 0xea, 0x74, 0x89, 0xfb, 0x37, 0x23, 0xd9, 0x79, 0x3c, 0x72, 0xa6];
 const PUMP_FEE_STD: PubkeyBytes = [0x17, 0x6c, 0xb2, 0x84, 0xb5, 0xbc, 0x50, 0x95, 0xcc, 0x34, 0x30, 0x16, 0x93, 0xe2, 0xcf, 0x68, 0xe2, 0x22, 0x4b, 0x41, 0x8c, 0x63, 0x9c, 0x45, 0xc8, 0xa6, 0x85, 0x58, 0x68, 0x5a, 0x08, 0x6d];
 const PUMP_FEE_MAYHEM: PubkeyBytes = [0xe8, 0x93, 0x14, 0x1f, 0xb1, 0x8e, 0x9f, 0x15, 0x74, 0xd8, 0x10, 0xe1, 0x78, 0xe1, 0x9e, 0x30, 0x60, 0x4e, 0x31, 0x75, 0xaa, 0x2e, 0x4a, 0x32, 0xdf, 0xc8, 0x60, 0x07, 0x27, 0xd1, 0x07, 0x09];
@@ -667,6 +668,78 @@ impl SignalDetector {
                                     slot = tx.slot,
                                     kol = %kol.label,
                                     "LocalShred 0-block KOL buy detected (router-wrapped PumpSwap)"
+                                );
+                                out.push(TriggerEvent {
+                                    opportunity_key,
+                                    strategy_id: StrategyId::KolBackrun,
+                                    trigger_slot: tx.slot,
+                                    detected_at_us,
+                                    venue: Venue::PumpSwap,
+                                    mint: cand_mint,
+                                    quote_mint: WSOL_MINT,
+                                    pool_pda,
+                                    dex_accounts: dex_slice,
+                                    kind: TriggerKind::KolBuy {
+                                        kol_id: kol.id.clone(),
+                                        kol_wallet: kol.pubkey,
+                                        watched_balance_account: watched_account,
+                                        is_spl_quote: kol.is_spl_quote,
+                                        pre_balance,
+                                        balance_threshold,
+                                        estimated_kol_spend: kol.buy_size_lamports,
+                                        buy_size_lamports: kol.buy_size_lamports,
+                                        max_curve_reserve_lamports: kol.max_curve_reserve_lamports,
+                                    },
+                                });
+                                break 'router_scan;
+                            }
+                        }
+                        // Terminal / Padre (`term9YPb...`) compressed PumpSwap router layout:
+                        // [i-1]=pool, [i]=PUMPSWAP_GLOBAL_CONFIG, [i+1]=base_mint, [i+2]=WSOL,
+                        // [i+3]=user_quote_ata, [i+4]=user_base_ata, [i+5]=base_vault, [i+6]=quote_vault,
+                        // [i+7]=fee_recip, [i+8]=fee_ata, [i+10]=event_auth
+                        for i in 1..accs.len().saturating_sub(10) {
+                            if accs[i] == PUMPSWAP_GLOBAL_CONFIG
+                                && accs[i - 1] != kol.pubkey
+                                && accs[i + 2] == WSOL_MINT
+                                && accs[i + 1] != WSOL_MINT
+                                && accs[i + 1] != [0u8; 32]
+                            {
+                                let pool_pda = accs[i - 1];
+                                let cand_mint = accs[i + 1];
+                                let base_tok_prog = if accs.contains(&crate::executor::TOKEN_2022_PROGRAM_ID) {
+                                    crate::executor::TOKEN_2022_PROGRAM_ID
+                                } else {
+                                    crate::executor::SPL_TOKEN_PROGRAM_ID
+                                };
+                                let dex_slice = vec![
+                                    pool_pda,                               // [0] pool
+                                    kol.pubkey,                             // [1] user (replaced with hot_wallet)
+                                    accs[i],                                // [2] global_config
+                                    cand_mint,                              // [3] base_mint
+                                    WSOL_MINT,                              // [4] quote_mint
+                                    accs[i + 4],                            // [5] user_base_ata (replaced with ephemeral_ata)
+                                    accs[i + 3],                            // [6] user_quote_ata (replaced with wsol_ata)
+                                    accs[i + 5],                            // [7] pool_base_vault
+                                    accs[i + 6],                            // [8] pool_quote_vault
+                                    accs[i + 7],                            // [9] protocol_fee_recipient
+                                    accs[i + 8],                            // [10] protocol_fee_recipient_ata
+                                    base_tok_prog,                          // [11] base_token_program
+                                    crate::executor::SPL_TOKEN_PROGRAM_ID,  // [12] quote_token_program
+                                    SYSTEM_PROGRAM_ID,                      // [13] system_program
+                                    ATA_PROGRAM_ID,                         // [14] associated_token_program
+                                    accs[i + 10],                           // [15] event_authority
+                                    PUMPSWAP_PROGRAM_ID,                    // [16] program
+                                ];
+                                let watched_account = kol.quote_token_account.unwrap_or(kol.pubkey);
+                                let pre_balance = self.balances.get(&watched_account).unwrap_or(0);
+                                let balance_threshold = pre_balance.saturating_sub(kol.margin_lamports);
+                                let opportunity_key =
+                                    compute_opportunity_key(&cand_mint, tx.slot, StrategyId::KolBackrun);
+                                info!(
+                                    slot = tx.slot,
+                                    kol = %kol.label,
+                                    "LocalShred 0-block KOL buy detected (Terminal/Padre PumpSwap)"
                                 );
                                 out.push(TriggerEvent {
                                     opportunity_key,
