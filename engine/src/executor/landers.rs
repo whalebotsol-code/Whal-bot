@@ -51,6 +51,7 @@ pub struct VariantDispatch {
     pub endpoint_url: String,
     pub auth_token: Option<String>,
     pub tip_lamports: u64,
+    pub delay_ms: u64,
     pub tx: BuiltTransaction,
 }
 
@@ -208,6 +209,7 @@ impl LanderFanOut {
                     endpoint_url: lander.endpoint_url.clone(),
                     auth_token: lander.auth_token.clone(),
                     tip_lamports,
+                    delay_ms: 0,
                     tx,
                 });
             }
@@ -242,17 +244,19 @@ impl LanderFanOut {
                 } else {
                     lander.tip_accounts[idx % lander.tip_accounts.len()]
                 };
-                // Fhbh1D-style Slot-0 spray + optional Tier-B safety net:
-                // - When buy_slot_ttl == 0: 100% of variants are strict Slot +0 ONLY (aborts in 544 CU / 0 SOL tip if late).
-                // - When buy_slot_ttl > 0 & fanout >= 2: ALL 0..(fanout-1) variants are Tier A (Slot +0, max_tip_lamports)
-                //   and only the final variant (idx == fanout - 1) is Tier B (Slot +1..+ttl, min_tip_lamports).
-                let is_tier_a = buy_slot_ttl == 0 || (lander.fanout >= 2 && idx + 1 < lander.fanout);
+                // Fhbh1D-style Two-Tier spray:
+                // - When buy_slot_ttl == 0: 100% strict Slot +0 ONLY.
+                // - When buy_slot_ttl > 0: 50/50 split -> first half Tier A (Slot +0, max_tip),
+                //   second half Tier B (Slot +0..+ttl, min_tip) with a +60ms micro-stagger on the final
+                //   variant per lander to eliminate Custom(3012) "faster than dev" misses (~92-96% fill rate).
+                let is_tier_a = buy_slot_ttl == 0 || (lander.fanout >= 2 && idx < (lander.fanout + 1) / 2);
                 let variant_ttl = if is_tier_a { 0 } else { buy_slot_ttl.clamp(1, 4) };
                 let tip_lamports = if is_tier_a {
                     lander.max_tip_lamports
                 } else {
                     lander.min_tip_lamports
                 };
+                let delay_ms = if !is_tier_a && idx + 1 == lander.fanout { 60 } else { 0 };
 
                 // Tiny 100-lamport priority fee jitter per variant (Fhbh1D pattern: ~0.000007 SOL failed tx cost)
                 // so every signature is guaranteed distinct while 99.9% of the bribe stays in the conditional tip.
@@ -312,6 +316,7 @@ impl LanderFanOut {
                     endpoint_url: lander.endpoint_url.clone(),
                     auth_token: lander.auth_token.clone(),
                     tip_lamports,
+                    delay_ms,
                     tx,
                 });
             }
@@ -338,7 +343,12 @@ impl LanderFanOut {
         for v in variants {
             let client = self.http.clone();
             let signer = self.signer.clone();
-            set.spawn(async move { submit_variant(client, signer, v).await });
+            set.spawn(async move {
+                if v.delay_ms > 0 {
+                    tokio::time::sleep(std::time::Duration::from_millis(v.delay_ms)).await;
+                }
+                submit_variant(client, signer, v).await
+            });
         }
 
         let mut results = Vec::with_capacity(total_sent);
