@@ -67,7 +67,7 @@ export function routes(env: Env, db: Db, cp: ControlPlane): Route[] {
 
     // ---------- positions ----------
     { method: 'GET', path: '/api/positions', auth: true, limit: 'read', handler: () => cp.positions() },
-    { method: 'POST', path: '/api/positions/:mint/sell', auth: true, limit: 'write', handler: (c) => cp.sell(c.params.mint, parse(SellInput, c.body).pct, actor(c)) },
+    { method: 'POST', path: '/api/positions/:mint/sell', auth: true, limit: 'write', handler: (c) => { const s = parse(SellInput, c.body); return cp.sell(c.params.mint, s.pct, actor(c), s.positionId); } },
 
     // ---------- bursts ----------
     { method: 'GET', path: '/api/bursts', auth: true, limit: 'read', handler: (c) => {

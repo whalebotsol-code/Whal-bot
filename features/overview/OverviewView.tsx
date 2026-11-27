@@ -60,6 +60,17 @@ export function OverviewView() {
     return () => window.removeEventListener('popstate', readParams);
   }, []);
 
+  // Roll 'today' date range forward automatically past midnight so new live positions & Panic Sell never vanish.
+  useEffect(() => {
+    if (dateRange.preset !== 'today') return;
+    const id = setInterval(() => {
+      if (Date.now() > dateRange.end) {
+        setDateRange(rangeForPreset('today'));
+      }
+    }, 60_000);
+    return () => clearInterval(id);
+  }, [dateRange.preset, dateRange.end]);
+
   const clearKolFilter = () => {
     setKolFilter(null);
     if (typeof window !== 'undefined') {

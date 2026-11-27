@@ -69,6 +69,7 @@ pub struct ManagedPosition {
     pub same_slot_tp_fired: bool,
     pub fired_steps: Vec<bool>,
     pub creator: Option<PubkeyBytes>,
+    pub kol_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -443,6 +444,7 @@ mod tests {
                 same_slot_tp_fired: false,
                 fired_steps: vec![],
                 creator: None,
+                kol_id: None,
             },
             true,
         );

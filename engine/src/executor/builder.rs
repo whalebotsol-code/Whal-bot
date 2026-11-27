@@ -801,9 +801,13 @@ impl TxBuilder {
                 accounts: vec![],
                 data: cu_limit,
             });
+            let cu_limit_val = (v1_config.compute_unit_limit as u128).max(1);
+            let micro_lamports_per_cu = ((v1_config.priority_fee_lamports as u128)
+                .saturating_mul(1_000_000)
+                / cu_limit_val) as u64;
             let mut cu_price = Vec::with_capacity(9);
             cu_price.push(3u8);
-            cu_price.extend_from_slice(&v1_config.priority_fee_lamports.to_le_bytes());
+            cu_price.extend_from_slice(&micro_lamports_per_cu.to_le_bytes());
             ixs.push(InstructionSpec {
                 label: "compute_budget_price",
                 program_id: COMPUTE_BUDGET_PROGRAM_ID,

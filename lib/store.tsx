@@ -190,7 +190,7 @@ export function TerminalProvider({ children }: { children: ReactNode }) {
       case 'position.sell': {
         const p = s.positions.find((x) => x.id === cmd.positionId);
         if (!p) throw new Error('Position no longer open');
-        return api('POST', `/api/positions/${encodeURIComponent(p.mint)}/sell`, { pct: cmd.pct });
+        return api('POST', `/api/positions/${encodeURIComponent(p.mint)}/sell`, { pct: cmd.pct, positionId: cmd.positionId });
       }
       case 'kol.upsert': {
         const { id, stats: _stats, ...body } = cmd.kol;

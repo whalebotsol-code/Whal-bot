@@ -76,6 +76,10 @@ impl WatchlistCache {
         self.by_wallet.retain(|_, rule| rule.id != id);
     }
 
+    pub fn list_ids(&self) -> Vec<String> {
+        self.by_wallet.iter().map(|e| e.value().id.clone()).collect()
+    }
+
     pub fn replace_all(&self, rules: Vec<KolRule>) {
         self.by_wallet.clear();
         for r in rules {

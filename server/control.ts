@@ -28,7 +28,7 @@ export const ControlInput = z.object({
   action: z.enum(['start', 'pause', 'shadow_mode', 'emergency_kill_switch']),
   reason: z.string().trim().max(200).optional(),
 }).strict();
-export const SellInput = z.object({ pct: z.number().refine((v): v is SellPct => (SELL_PCTS as readonly number[]).includes(v), 'pct must be one of 15, 25, 33, 50, 100') }).strict();
+export const SellInput = z.object({ pct: z.number().refine((v): v is SellPct => (SELL_PCTS as readonly number[]).includes(v), 'pct must be one of 15, 25, 33, 50, 100'), positionId: z.string().min(1).max(128).optional() }).strict();
 export const NonceInput = z.object({
   action: z.enum(['create', 'topup', 'advance', 'check']),
   count: z.number().int().min(1).max(32).optional(),
@@ -171,12 +171,32 @@ export class ControlPlane extends EventEmitter {
     const want = this.db.listKols();
     for (const k of rt?.kols ?? []) if (!want.some((w) => w.id === k.id)) await this.engine.command({ type: 'kol.remove', id: k.id }).catch(() => {});
     for (const k of want) await this.engine.command({ type: 'kol.upsert', kol: k }).catch(() => {});
+    // Preserve existing paper positions & live status across bridge reconnects so stale initial snapshot never clobbers them.
+    const prevPaperPositions = (this.rt?.positions ?? []).filter((p) => p.id.startsWith('paper_'));
+    const prevSession = this.rt?.session;
     // Auto-restore persisted engine mode (SHADOW or RUNNING) across restarts/redeploys so deploys never leave the bot stuck PAUSED.
     const savedMode = this.db.getMeta('engine_mode');
-    if ((savedMode === 'SHADOW' || savedMode === 'RUNNING') && rt?.engine.status === 'PAUSED') {
-      await this.engine.command({ type: 'control', status: savedMode }).catch(() => {});
+    const restoredMode = (savedMode === 'SHADOW' || savedMode === 'RUNNING') && rt?.engine.status === 'PAUSED' ? savedMode : null;
+    if (restoredMode) {
+      await this.engine.command({ type: 'control', status: restoredMode }).catch(() => {});
     }
-    this.rt = this.engine.runtime();
+    const freshRt = this.engine.runtime();
+    if (freshRt) {
+      if (restoredMode) {
+        freshRt.engine = { status: restoredMode, changedAt: Date.now() };
+      }
+      if (prevPaperPositions.length > 0) {
+        const liveOnly = freshRt.positions.filter((p) => !p.id.startsWith('paper_'));
+        freshRt.positions = [...liveOnly, ...prevPaperPositions];
+      }
+      if (prevSession) {
+        freshRt.session = prevSession;
+      }
+      if (this.liveBalances.sol > 0 || this.liveBalances.solUsd > 0) {
+        freshRt.balances = { ...freshRt.balances, ...this.liveBalances };
+      }
+    }
+    this.rt = freshRt;
     // Persist the engine's recent history (first run: simulator backfill).
     if (this.rt) {
       this.db.tx(() => {
@@ -266,9 +286,14 @@ export class ControlPlane extends EventEmitter {
           };
         });
         // Detect real live positions that just closed on-chain so Closed, Win Rate, Realized PnL & PnL Calendar update!
-        let closedRec = e.closed;
-        if (!closedRec) {
+        const closedBatch: ClosedPosition[] = [];
+        if (e.closed) {
+          r.closed = [e.closed, ...r.closed].slice(0, 5000);
+          this.db.insertClosed(e.closed);
+          closedBatch.push(e.closed);
+        } else {
           const nextMints = new Set(enriched.map((p) => p.mint));
+          let liveNetDelta = 0;
           for (const prev of prevLive) {
             if (!nextMints.has(prev.mint)) {
               // Guard against duplicate close records for the same mint within 10s.
@@ -287,7 +312,7 @@ export class ControlPlane extends EventEmitter {
                 closedAt: Date.now(),
                 entrySol: prev.entrySol,
                 proceedsSol,
-                solUsd: r.balances.solUsd || 70,
+                solUsd: r.balances.solUsd || this.liveBalances.solUsd || 70,
                 exitReason: 'Live exit',
               };
               r.closed = [cl, ...r.closed].slice(0, 5000);
@@ -295,15 +320,25 @@ export class ControlPlane extends EventEmitter {
               void this.resolveClosedLandingSlot(cl.id, cl.mint);
               this.cloud?.syncClosed(cl);
               this.recordPaperKolOutcome(cl);
-              closedRec = cl;
+              liveNetDelta += cl.proceedsSol - cl.entrySol;
+              closedBatch.push(cl);
             }
           }
-        } else {
-          r.closed = [closedRec, ...r.closed].slice(0, 5000);
-          this.db.insertClosed(closedRec);
+          if (closedBatch.length > 0) {
+            r.session = { ...r.session, realizedSol: +(r.session.realizedSol + liveNetDelta).toFixed(6) };
+          }
         }
         r.positions = [...enriched, ...paperPositions];
-        this.publish({ ...e, positions: r.positions, closed: closedRec });
+        if (closedBatch.length <= 1) {
+          this.publish({ ...e, positions: r.positions, closed: closedBatch[0] });
+        } else {
+          for (const cl of closedBatch) {
+            this.publish({ ...e, positions: r.positions, closed: cl });
+          }
+        }
+        if (closedBatch.length > 0) {
+          this.publish({ type: 'session_updated', ts: Date.now(), session: r.session });
+        }
         return;
       }
       case 'sweep_executed': this.db.upsertSweep(e.sweep); break;
@@ -380,8 +415,10 @@ export class ControlPlane extends EventEmitter {
         // (21-tx Slot-0 sprays push confirmed buys past limit=20).
         const wsigs = await rpc<Array<{ signature: string; slot: number; err: unknown }>>('getSignaturesForAddress', [wallet, { limit: 150 }]);
         if (!wsigs?.length) return;
+        let checked = 0;
         for (const s of wsigs) {
           if (s.err !== null) continue;
+          if (++checked > 30) break;
           const tx = await rpc<{
             slot?: number;
             meta?: {
@@ -394,7 +431,8 @@ export class ControlPlane extends EventEmitter {
           const pre = (tx.meta.preTokenBalances ?? []).find((b) => b.owner === wallet && b.mint === mint)?.uiTokenAmount?.uiAmount ?? 0;
           const post = (tx.meta.postTokenBalances ?? []).find((b) => b.owner === wallet && b.mint === mint)?.uiTokenAmount?.uiAmount ?? 0;
           if (post > pre && typeof tx.slot === 'number') {
-            buySlot = buySlot === null ? tx.slot : Math.min(buySlot, tx.slot);
+            buySlot = tx.slot;
+            break;
           }
         }
       }
@@ -618,9 +656,10 @@ export class ControlPlane extends EventEmitter {
     return { status };
   }
 
-  async sell(mint: string, pct: SellPct, a: Actor) {
+  async sell(mint: string, pct: SellPct, a: Actor, positionId?: string) {
     const r = this.needRt();
-    const pos = r.positions.find((p) => p.mint === mint);
+    const pos = (positionId ? r.positions.find((p) => p.id === positionId) : undefined)
+      ?? r.positions.find((p) => p.mint === mint);
     if (!pos) throw new HttpError(404, 'No open position for that mint');
     if (pos.id.startsWith('paper_')) {
       const sellTokens = pos.tokens * (pct / 100);

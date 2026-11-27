@@ -334,6 +334,10 @@ impl ExecutorService {
                             TriggerKind::ZeroBlockLaunch { creator, .. } => Some(*creator),
                             TriggerKind::KolBuy { kol_wallet, .. } => Some(*kol_wallet),
                         },
+                        kol_id: match &trigger.kind {
+                            TriggerKind::KolBuy { kol_id, .. } => Some(kol_id.clone()),
+                            TriggerKind::ZeroBlockLaunch { .. } => None,
+                        },
                     },
                     high_conviction,
                 );

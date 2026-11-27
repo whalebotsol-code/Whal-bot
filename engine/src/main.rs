@@ -479,7 +479,7 @@ async fn connect_bridge_once(
             "feed": [],
             "positions": [],
             "closed": [],
-            "kols": [],
+            "kols": ctx.watchlist.list_ids().into_iter().map(|id| json!({ "id": id })).collect::<Vec<_>>(),
             "landers": [],
             "sweeps": [],
             "inventory": [],
@@ -1075,6 +1075,7 @@ async fn main() {
             let mut zero_ticks: std::collections::HashMap<PubkeyBytes, u8> = std::collections::HashMap::new();
             let mut last_ui: std::collections::HashMap<PubkeyBytes, Value> = std::collections::HashMap::new();
             let mut last_sell_at: std::collections::HashMap<PubkeyBytes, u64> = std::collections::HashMap::new();
+            let mut had_open_positions = false;
             loop {
                 ticker.tick().await;
                 let open = exit_mgr.list_positions();
@@ -1082,8 +1083,16 @@ async fn main() {
                     zero_ticks.clear();
                     last_ui.clear();
                     last_sell_at.clear();
+                    if had_open_positions {
+                        had_open_positions = false;
+                        let _ = exit_out.send(json!({
+                            "type": "event",
+                            "event": { "type": "position_updated", "ts": now_ms(), "positions": [] }
+                        }));
+                    }
                     continue;
                 }
+                had_open_positions = true;
                 let now_secs = SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .map(|d| d.as_secs())
@@ -1255,7 +1264,7 @@ async fn main() {
                         "mint": m,
                         "symbol": &m[..m.len().min(5)],
                         "venue": pos.venue,
-                        "kolId": Value::Null,
+                        "kolId": pos.kol_id,
                         "openedAt": pos.opened_at_secs * 1_000,
                         "openedSlot": pos.opened_slot,
                         "entrySol": pos.entry_price_sol,
