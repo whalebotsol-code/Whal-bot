@@ -1400,6 +1400,38 @@ async fn main() {
                         if amt != "0" {
                             continue;
                         }
+                        let state_s = item
+                            .pointer("/account/data/parsed/info/state")
+                            .and_then(|x| x.as_str())
+                            .unwrap_or("initialized");
+                        if state_s == "frozen" {
+                            continue;
+                        }
+                        if let Some(close_auth) = item
+                            .pointer("/account/data/parsed/info/closeAuthority")
+                            .and_then(|x| x.as_str())
+                        {
+                            if close_auth != rent_wallet_str {
+                                continue;
+                            }
+                        }
+                        // Skip Token-2022 accounts with non-zero withheld transfer fees (cannot be closed until harvested)
+                        let has_withheld = item
+                            .pointer("/account/data/parsed/info/extensions")
+                            .and_then(|x| x.as_array())
+                            .map(|exts| {
+                                exts.iter().any(|ext| {
+                                    ext.get("extension").and_then(|e| e.as_str()) == Some("transferFeeAmount")
+                                        && ext
+                                            .pointer("/state/withheldAmount")
+                                            .map(|w| w.as_u64().unwrap_or(0) > 0 || w.as_str().map(|s| s != "0").unwrap_or(false))
+                                            .unwrap_or(false)
+                                })
+                            })
+                            .unwrap_or(false);
+                        if has_withheld {
+                            continue;
+                        }
                         let mint_s = item
                             .pointer("/account/data/parsed/info/mint")
                             .and_then(|x| x.as_str())
@@ -1435,6 +1467,26 @@ async fn main() {
                 let Some(bh_str) = bh_val.pointer("/result/value/blockhash").and_then(|x| x.as_str()) else { continue };
                 let Ok(bh) = pubkey_from_bs58(bh_str) else { continue };
                 let count = close_ixs.len();
+                let mut ixs = Vec::with_capacity(count + 2);
+                let mut cu_lim = Vec::with_capacity(5);
+                cu_lim.push(2u8);
+                cu_lim.extend_from_slice(&100_000u32.to_le_bytes());
+                ixs.push(whal_engine::executor::InstructionSpec {
+                    label: "rent_cu_limit",
+                    program_id: pubkey_from_bs58("ComputeBudget111111111111111111111111111111").unwrap_or([0u8; 32]),
+                    accounts: vec![],
+                    data: cu_lim,
+                });
+                let mut cu_px = Vec::with_capacity(9);
+                cu_px.push(3u8);
+                cu_px.extend_from_slice(&25_000u64.to_le_bytes());
+                ixs.push(whal_engine::executor::InstructionSpec {
+                    label: "rent_cu_price",
+                    program_id: pubkey_from_bs58("ComputeBudget111111111111111111111111111111").unwrap_or([0u8; 32]),
+                    accounts: vec![],
+                    data: cu_px,
+                });
+                ixs.extend(close_ixs);
                 let built = whal_engine::executor::BuiltTransaction {
                     version: TxVersion::V1,
                     v1_config: None,
@@ -1443,7 +1495,7 @@ async fn main() {
                     fee_payer: rent_wallet,
                     ephemeral_token_account: [0u8; 32],
                     ephemeral_seed: String::new(),
-                    instructions: close_ixs,
+                    instructions: ixs,
                 };
                 let (wire_bytes, sig_bs58) = whal_engine::executor::serialize_and_sign_tx(&built, &rent_signer);
                 let tx_b64 = base64::engine::general_purpose::STANDARD.encode(&wire_bytes);
@@ -1456,13 +1508,22 @@ async fn main() {
                 match http.post(&rent_rpc).json(&send_body).send().await {
                     Ok(r) => {
                         let txt = r.text().await.unwrap_or_default();
-                        info!(
-                            closed_atas = count,
-                            reclaimed_sol = count as f64 * 0.00203928,
-                            sig = %sig_bs58,
-                            rpc_resp = %&txt[..txt.len().min(120)],
-                            "Rent-reclaim sweeper submitted CloseAccount batch"
-                        );
+                        if txt.contains(r#""error""#) {
+                            warn!(
+                                closed_atas = count,
+                                sig = %sig_bs58,
+                                rpc_resp = %&txt[..txt.len().min(180)],
+                                "Rent-reclaim sweeper RPC preflight rejected batch"
+                            );
+                        } else {
+                            info!(
+                                closed_atas = count,
+                                reclaimed_sol = count as f64 * 0.00203928,
+                                sig = %sig_bs58,
+                                rpc_resp = %&txt[..txt.len().min(120)],
+                                "Rent-reclaim sweeper submitted CloseAccount batch"
+                            );
+                        }
                     }
                     Err(e) => warn!(error = %e, "Rent-reclaim sweeper sendTransaction failed"),
                 }

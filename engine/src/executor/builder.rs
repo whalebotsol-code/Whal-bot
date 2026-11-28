@@ -412,10 +412,12 @@ impl TxBuilder {
                 data: cu_price,
             });
             // Fhbh1D parity: SetLoadedAccountsDataSizeLimit (opcode 4) gives Solana scheduler priority over default 64 MB txs.
+            // Floor at 4 MiB so SIMD-0186 LoaderV3 ProgramData (Pump.fun + PumpSwap + Token-2022 + Lighthouse ~1.5-3 MiB) never exceeds cap.
             if p.v1_config.loaded_accounts_data_size_limit > 0 {
+                let safe_limit = p.v1_config.loaded_accounts_data_size_limit.max(4 * 1024 * 1024);
                 let mut data_limit = Vec::with_capacity(5);
                 data_limit.push(4u8);
-                data_limit.extend_from_slice(&p.v1_config.loaded_accounts_data_size_limit.to_le_bytes());
+                data_limit.extend_from_slice(&safe_limit.to_le_bytes());
                 ixs.push(InstructionSpec {
                     label: "compute_budget_loaded_accounts",
                     program_id: COMPUTE_BUDGET_PROGRAM_ID,
@@ -828,9 +830,10 @@ impl TxBuilder {
                 data: cu_price,
             });
             if v1_config.loaded_accounts_data_size_limit > 0 {
+                let safe_limit = v1_config.loaded_accounts_data_size_limit.max(4 * 1024 * 1024);
                 let mut data_limit = Vec::with_capacity(5);
                 data_limit.push(4u8);
-                data_limit.extend_from_slice(&v1_config.loaded_accounts_data_size_limit.to_le_bytes());
+                data_limit.extend_from_slice(&safe_limit.to_le_bytes());
                 ixs.push(InstructionSpec {
                     label: "compute_budget_loaded_accounts",
                     program_id: COMPUTE_BUDGET_PROGRAM_ID,
