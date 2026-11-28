@@ -461,6 +461,7 @@ const SOURCE: Record<string, { label: string; tone: string; title: string }> = {
 };
 function SourceBadge() {
   const { state } = useTerminal();
+  if (state.engineSource === 'bridge') return null;
   const s = SOURCE[state.engineSource ?? 'disconnected'] ?? SOURCE.disconnected;
   return <span title={s.title} className={cx('hidden text-[0.72rem] font-semibold tracking-wide sm:inline-flex', s.tone)}>{s.label}</span>;
 }
