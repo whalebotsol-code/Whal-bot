@@ -244,19 +244,32 @@ impl LanderFanOut {
                 } else {
                     lander.tip_accounts[idx % lander.tip_accounts.len()]
                 };
-                // Fhbh1D-style Two-Tier spray:
-                // - When buy_slot_ttl == 0: 100% strict Slot +0 ONLY.
-                // - When buy_slot_ttl > 0: 50/50 split -> first half Tier A (Slot +0, max_tip),
-                //   second half Tier B (Slot +0..+ttl, min_tip) with a +60ms micro-stagger on the final
-                //   variant per lander to eliminate Custom(3012) "faster than dev" misses (~92-96% fill rate).
-                let is_tier_a = buy_slot_ttl == 0 || lander.fanout <= 1 || idx < (lander.fanout + 1) / 2;
-                let variant_ttl = if is_tier_a { 0 } else { buy_slot_ttl.clamp(1, 4) };
+                // 3-Wave Two-Tier spray (strictly capped at TTL <= 3 to avoid negative-EV +4..+15 slots):
+                // - Tier A (first half): 0ms, strict Slot +0, max_tip
+                // - Tier B-1 (middle): +40ms, Slot +0..+2, min_tip (catches late Slot +0 / early Slot +1)
+                // - Tier B-2 (final):  +95ms, Slot +0..+3, min_tip (catches congested Slot +1..+3 leaders)
+                let tier_a_count = (lander.fanout + 1) / 2;
+                let is_tier_a = buy_slot_ttl == 0 || lander.fanout <= 1 || idx < tier_a_count;
+                let is_final_wave = !is_tier_a && idx + 1 == lander.fanout;
+                let variant_ttl = if is_tier_a {
+                    0
+                } else if is_final_wave {
+                    buy_slot_ttl.clamp(1, 3)
+                } else {
+                    buy_slot_ttl.clamp(1, 2)
+                };
                 let tip_lamports = if is_tier_a {
                     lander.max_tip_lamports
                 } else {
                     lander.min_tip_lamports
                 };
-                let delay_ms = if !is_tier_a && idx + 1 == lander.fanout { 60 } else { 0 };
+                let delay_ms = if is_tier_a {
+                    0
+                } else if is_final_wave {
+                    95
+                } else {
+                    40
+                };
 
                 // Tiny 100-lamport priority fee jitter per variant (Fhbh1D pattern: ~0.000007 SOL failed tx cost)
                 // so every signature is guaranteed distinct while 99.9% of the bribe stays in the conditional tip.

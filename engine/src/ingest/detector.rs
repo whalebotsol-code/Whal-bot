@@ -574,13 +574,16 @@ impl SignalDetector {
                                             is_mayhem,
                                             &[],
                                         );
+                                        // Require resolved creator_vault [start + 10] (if ALT is still warming up it's [0u8; 32],
+                                        // and falling back to kol.pubkey guarantees Custom(2006) ConstraintSeeds on-chain).
+                                        if accs[start + 10] == [0u8; 32] {
+                                            continue;
+                                        }
                                         // Override exact associated_bonding_curve [4] & creator_vault [9] from FlashX/V2 slice
                                         if accs[start + 6] != [0u8; 32] {
                                             dex_slice[4] = accs[start + 6];
                                         }
-                                        if accs[start + 10] != [0u8; 32] {
-                                            dex_slice[9] = accs[start + 10];
-                                        }
+                                        dex_slice[9] = accs[start + 10];
                                         let watched_account = kol.quote_token_account.unwrap_or(kol.pubkey);
                                         let pre_balance = self.balances.get(&watched_account).unwrap_or(0);
                                         let balance_threshold = pre_balance.saturating_sub(kol.margin_lamports);
