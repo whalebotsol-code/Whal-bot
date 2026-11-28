@@ -1524,7 +1524,9 @@ export class SolanaLiveFeed {
     if (this.inFlightCurvePoll) return;
     const targets: { mint: string; curve: string }[] = [];
     for (const [mint, e] of this.paper.entries()) {
-      if (e.bondingCurveKey) targets.push({ mint, curve: e.bondingCurveKey });
+      if (e.bondingCurveKey && e.pos.venue === 'Pump.fun' && e.bondingCurveKey !== mint) {
+        targets.push({ mint, curve: e.bondingCurveKey });
+      }
     }
     if (targets.length === 0) return;
     this.inFlightCurvePoll = true;
@@ -1553,10 +1555,11 @@ export class SolanaLiveFeed {
         if (!b64) continue;
         const buf = Buffer.from(b64, 'base64');
         if (buf.length < 49) continue;
-        // Pump.fun BondingCurve layout: disc(0..8) | virtual_token_reserves(8..16) | virtual_sol_reserves(16..24) | ... | complete(48)
-        const complete = buf[48] === 1;
+        // Pump.fun BondingCurve layout: disc(0..8 = 17b7f83760d8ac60) | virtual_token_reserves(8..16) | virtual_sol_reserves(16..24) | ... | complete(48)
+        const isPumpCurve = buf.subarray(0, 8).equals(Buffer.from('17b7f83760d8ac60', 'hex'));
+        const complete = !isPumpCurve || buf[48] === 1;
         if (complete) {
-          // Graduated off bonding curve -> let DexScreener track PumpSwap/Raydium price
+          // Non-Pump.fun account (e.g. PumpSwap/Raydium pool or mint) or graduated curve -> hand off to DexScreener live poller!
           const entry = this.paper.get(targets[i].mint);
           if (entry) entry.bondingCurveKey = undefined;
           continue;
@@ -1610,7 +1613,9 @@ export class SolanaLiveFeed {
     // Only poll DexScreener for mints WITHOUT an active on-chain bondingCurveKey (prevents stale DexScreener cache from flickering against live RPC!).
     const fallbackMints: string[] = [];
     for (const [mint, e] of this.paper.entries()) {
-      if (!e.bondingCurveKey) fallbackMints.push(mint);
+      if (!e.bondingCurveKey || e.pos.venue !== 'Pump.fun' || e.bondingCurveKey === mint) {
+        fallbackMints.push(mint);
+      }
     }
     if (fallbackMints.length === 0) return;
     const mints = fallbackMints.join(',');
