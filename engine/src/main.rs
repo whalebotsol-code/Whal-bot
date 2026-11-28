@@ -1307,7 +1307,7 @@ async fn main() {
         sweeper_cfg,
         ingest.balances.clone(),
         sweep_tx,
-        signer,
+        signer.clone(),
     ));
     let _sweep_handle = sweeper.spawn();
 
@@ -1322,10 +1322,11 @@ async fn main() {
         }
     });
 
-    // Periodic live slot_tick forwarder (from ShredStream / Geyser)
+    // Periodic live slot_tick forwarder (from ShredStream / Geyser) with real NoncePool telemetry
     let slot_out = outbound_tx.clone();
     let shred_ref = ingest.shredstream.clone();
     let geyser_ref = ingest.geyser.clone();
+    let slot_nonces = executor.nonce_pool();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_millis(800));
         let mut last_sent = 0u64;
@@ -1342,7 +1343,7 @@ async fn main() {
                         "chain": {
                             "slot": slot,
                             "shredLatencyMs": 0,
-                            "nonces": { "ready": 0, "total": 0 },
+                            "nonces": { "ready": slot_nonces.ready_count(), "total": slot_nonces.len() },
                             "ring": { "used": 0, "size": 64 }
                         }
                     }
@@ -1350,6 +1351,124 @@ async fn main() {
             }
         }
     });
+
+    // Fhbh1D parity: Background Zero-Balance ATA Rent-Reclaim Sweeper (reclaims 0.002039 SOL per empty SPL/T22 ATA every 5m)
+    if !rpc_url.is_empty() && signer.is_some() {
+        let rent_rpc = rpc_url.clone();
+        let rent_signer = signer.clone().unwrap();
+        let rent_exits = exit_engine.clone();
+        let rent_wallet = hot_wallet_pubkey;
+        let rent_wallet_str = bs58::encode(&rent_wallet).into_string();
+        tokio::spawn(async move {
+            const USDC_MINT_STR: &str = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
+            const WSOL_MINT_STR: &str = "So11111111111111111111111111111111111111112";
+            let http = reqwest::Client::builder()
+                .timeout(Duration::from_secs(6))
+                .build()
+                .unwrap_or_default();
+            tokio::time::sleep(Duration::from_secs(15)).await;
+            let mut ticker = tokio::time::interval(Duration::from_secs(300));
+            loop {
+                ticker.tick().await;
+                let open_mints: std::collections::HashSet<String> = rent_exits
+                    .list_positions()
+                    .into_iter()
+                    .map(|p| bs58::encode(&p.mint).into_string())
+                    .collect();
+                let mut close_ixs: Vec<whal_engine::executor::InstructionSpec> = Vec::new();
+                for (prog_str, prog_pk) in [
+                    ("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", SPL_TOKEN_PROGRAM_ID),
+                    ("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb", TOKEN_2022_PROGRAM_ID),
+                ] {
+                    let body = json!({
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "method": "getTokenAccountsByOwner",
+                        "params": [rent_wallet_str, { "programId": prog_str }, { "encoding": "jsonParsed" }]
+                    });
+                    let Ok(resp) = http.post(&rent_rpc).json(&body).send().await else { continue };
+                    let Ok(v) = resp.json::<Value>().await else { continue };
+                    let Some(vals) = v.pointer("/result/value").and_then(|x| x.as_array()) else { continue };
+                    for item in vals {
+                        if close_ixs.len() >= 12 {
+                            break;
+                        }
+                        let amt = item
+                            .pointer("/account/data/parsed/info/tokenAmount/amount")
+                            .and_then(|x| x.as_str())
+                            .unwrap_or("1");
+                        if amt != "0" {
+                            continue;
+                        }
+                        let mint_s = item
+                            .pointer("/account/data/parsed/info/mint")
+                            .and_then(|x| x.as_str())
+                            .unwrap_or("");
+                        if mint_s == USDC_MINT_STR || mint_s == WSOL_MINT_STR || open_mints.contains(mint_s) {
+                            continue;
+                        }
+                        let Some(ata_str) = item.get("pubkey").and_then(|x| x.as_str()) else { continue };
+                        let Ok(ata_pk) = pubkey_from_bs58(ata_str) else { continue };
+                        close_ixs.push(whal_engine::executor::InstructionSpec {
+                            label: "rent_reclaim_close_ata",
+                            program_id: prog_pk,
+                            accounts: vec![
+                                whal_engine::executor::AccountMetaSpec { pubkey: ata_pk, is_signer: false, is_writable: true },
+                                whal_engine::executor::AccountMetaSpec { pubkey: rent_wallet, is_signer: false, is_writable: true },
+                                whal_engine::executor::AccountMetaSpec { pubkey: rent_wallet, is_signer: true, is_writable: false },
+                            ],
+                            data: vec![9u8], // SPL Token / Token-2022 CloseAccount
+                        });
+                    }
+                }
+                if close_ixs.is_empty() {
+                    continue;
+                }
+                let bh_body = json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "getLatestBlockhash",
+                    "params": [{ "commitment": "confirmed" }]
+                });
+                let Ok(bh_resp) = http.post(&rent_rpc).json(&bh_body).send().await else { continue };
+                let Ok(bh_val) = bh_resp.json::<Value>().await else { continue };
+                let Some(bh_str) = bh_val.pointer("/result/value/blockhash").and_then(|x| x.as_str()) else { continue };
+                let Ok(bh) = pubkey_from_bs58(bh_str) else { continue };
+                let count = close_ixs.len();
+                let built = whal_engine::executor::BuiltTransaction {
+                    version: TxVersion::V1,
+                    v1_config: None,
+                    lookup_tables: vec![],
+                    recent_blockhash: bh,
+                    fee_payer: rent_wallet,
+                    ephemeral_token_account: [0u8; 32],
+                    ephemeral_seed: String::new(),
+                    instructions: close_ixs,
+                };
+                let (wire_bytes, sig_bs58) = whal_engine::executor::serialize_and_sign_tx(&built, &rent_signer);
+                let tx_b64 = base64::engine::general_purpose::STANDARD.encode(&wire_bytes);
+                let send_body = json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "sendTransaction",
+                    "params": [tx_b64, { "encoding": "base64", "skipPreflight": false }]
+                });
+                match http.post(&rent_rpc).json(&send_body).send().await {
+                    Ok(r) => {
+                        let txt = r.text().await.unwrap_or_default();
+                        info!(
+                            closed_atas = count,
+                            reclaimed_sol = count as f64 * 0.00203928,
+                            sig = %sig_bs58,
+                            rpc_resp = %&txt[..txt.len().min(120)],
+                            "Rent-reclaim sweeper submitted CloseAccount batch"
+                        );
+                    }
+                    Err(e) => warn!(error = %e, "Rent-reclaim sweeper sendTransaction failed"),
+                }
+            }
+        });
+    }
 
     // 4s Recent Blockhash RPC refresher (enables live execution even when durable nonce pool is 0/0)
     if !rpc_url.is_empty() {

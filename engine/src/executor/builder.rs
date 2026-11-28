@@ -411,6 +411,18 @@ impl TxBuilder {
                 accounts: vec![],
                 data: cu_price,
             });
+            // Fhbh1D parity: SetLoadedAccountsDataSizeLimit (opcode 4) gives Solana scheduler priority over default 64 MB txs.
+            if p.v1_config.loaded_accounts_data_size_limit > 0 {
+                let mut data_limit = Vec::with_capacity(5);
+                data_limit.push(4u8);
+                data_limit.extend_from_slice(&p.v1_config.loaded_accounts_data_size_limit.to_le_bytes());
+                ixs.push(InstructionSpec {
+                    label: "compute_budget_loaded_accounts",
+                    program_id: COMPUTE_BUDGET_PROGRAM_ID,
+                    accounts: vec![],
+                    data: data_limit,
+                });
+            }
         }
 
         // ix 3: SystemProgram::CreateAccountWithSeed (Layer-2 atomic mutex, 8-char hex seed, 165B)
@@ -815,6 +827,17 @@ impl TxBuilder {
                 accounts: vec![],
                 data: cu_price,
             });
+            if v1_config.loaded_accounts_data_size_limit > 0 {
+                let mut data_limit = Vec::with_capacity(5);
+                data_limit.push(4u8);
+                data_limit.extend_from_slice(&v1_config.loaded_accounts_data_size_limit.to_le_bytes());
+                ixs.push(InstructionSpec {
+                    label: "compute_budget_loaded_accounts",
+                    program_id: COMPUTE_BUDGET_PROGRAM_ID,
+                    accounts: vec![],
+                    data: data_limit,
+                });
+            }
         }
         ixs.extend(sell_ixs);
 
