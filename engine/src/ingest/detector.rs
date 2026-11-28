@@ -855,18 +855,27 @@ impl SignalDetector {
                         compute_opportunity_key(&launch.mint, tx.slot, launch.strategy_id);
                     // For Pump.fun, build all 18 mainnet Buy accounts locally in 0.1ms (works even on v0 ALT shreds!).
                     let dex_accounts = if launch.venue == Venue::PumpFun {
+                        // Pump.fun 2026 Fee-Sharing launches call PUMP_FEE_PROG (pfeeUxB6...) in the same tx,
+                        // which updates bonding_curve.creator to PDA(["sharing-config", mint], PUMP_FEE_PROG).
+                        let is_fee_sharing = tx.instructions.iter().any(|i| i.program_id == PUMP_FEE_PROG);
+                        let effective_creator = if is_fee_sharing {
+                            find_pda(&[b"sharing-config", &launch.mint], &PUMP_FEE_PROG)
+                        } else {
+                            launch.creator
+                        };
                         info!(
                             slot = tx.slot,
                             symbol = %launch.symbol,
                             dev_buy_lamports = bundled_dev_buy,
                             is_token_2022 = launch.is_token_2022,
                             is_mayhem = launch.is_mayhem,
+                            is_fee_sharing,
                             "LocalShred 0-block Pump.fun launch detected -> firing 18-acc local buy"
                         );
                         build_local_pumpfun_buy_accounts(
                             launch.mint,
                             launch.pool_pda,
-                            launch.creator,
+                            effective_creator,
                             launch.is_token_2022,
                             launch.is_mayhem,
                             &bundled_buy_accounts,
