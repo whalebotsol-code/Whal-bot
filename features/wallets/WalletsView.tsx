@@ -247,6 +247,38 @@ export function WalletsView() {
   const [copiedSecret, setCopiedSecret] = useState(false);
 
   const [removeTarget, setRemoveTarget] = useState<CustomWallet | null>(null);
+  const [hiddenBuiltins, setHiddenBuiltins] = useState<string[]>(() => {
+    if (typeof window === 'undefined') return [];
+    try { return JSON.parse(localStorage.getItem('whal.hiddenWallets') || '[]') as string[]; } catch { return []; }
+  });
+  const [hideBuiltinTarget, setHideBuiltinTarget] = useState<{ id: string; label: string } | null>(null);
+
+  const hideBuiltin = (id: string, label: string) => {
+    setHiddenBuiltins((prev) => {
+      const next = prev.includes(id) ? prev : [...prev, id];
+      try { localStorage.setItem('whal.hiddenWallets', JSON.stringify(next)); } catch { /* ignore */ }
+      return next;
+    });
+    setHideBuiltinTarget(null);
+    toast(`Deleted "${label}" from Wallets view`, 'info');
+  };
+
+  const restoreBuiltins = () => {
+    setHiddenBuiltins([]);
+    try { localStorage.removeItem('whal.hiddenWallets'); } catch { /* ignore */ }
+    toast('Restored default wallets', 'ok');
+  };
+
+  const deleteBuiltinBtn = (id: string, label: string) => (
+    <button
+      type="button"
+      onClick={() => setHideBuiltinTarget({ id, label })}
+      className="inline-flex h-8 items-center gap-1.5 rounded-full border border-rose-500/25 bg-rose-500/10 px-3 text-xs font-medium text-rose-300 transition-colors hover:bg-rose-500/20"
+    >
+      <Trash2 className="size-3.5" aria-hidden />
+      Delete
+    </button>
+  );
 
   const loadWallets = useCallback(async () => {
     setLoadingWallets(true);
@@ -386,12 +418,15 @@ export function WalletsView() {
       solUsd={b.solUsd}
       onCopy={(a) => void copyText(a)}
       secondaryAction={
-        <Link
-          href="/?tab=positions"
-          className="inline-flex h-8 items-center gap-1.5 rounded-full border border-white/10 bg-white/[0.04] px-3 text-xs font-medium text-fg2 hover:bg-white/[0.09] hover:text-fg"
-        >
-          Positions ({paperOpen.length})
-        </Link>
+        <>
+          <Link
+            href="/?tab=positions"
+            className="inline-flex h-8 items-center gap-1.5 rounded-full border border-white/10 bg-white/[0.04] px-3 text-xs font-medium text-fg2 hover:bg-white/[0.09] hover:text-fg"
+          >
+            Positions ({paperOpen.length})
+          </Link>
+          {deleteBuiltinBtn('shadow', 'Paper Wallet')}
+        </>
       }
       primaryAction={
         <button
@@ -420,16 +455,19 @@ export function WalletsView() {
       onCopy={(a) => void copyText(a)}
       onReceive={phantom.publicKey ? () => setReceiveAddr({ label: 'Phantom Wallet', addr: phantom.publicKey! }) : undefined}
       secondaryAction={
-        phantom.connected ? (
-          <button
-            type="button"
-            onClick={() => void phantom.disconnect().then(() => toast('Phantom disconnected', 'info'))}
-            className="inline-flex h-8 items-center gap-1.5 rounded-full border border-white/10 bg-white/[0.04] px-3 text-xs font-medium text-fg2 hover:bg-white/[0.09] hover:text-rose-300"
-          >
-            <Power className="size-3.5" aria-hidden />
-            Disconnect
-          </button>
-        ) : null
+        <>
+          {phantom.connected && (
+            <button
+              type="button"
+              onClick={() => void phantom.disconnect().then(() => toast('Phantom disconnected', 'info'))}
+              className="inline-flex h-8 items-center gap-1.5 rounded-full border border-white/10 bg-white/[0.04] px-3 text-xs font-medium text-fg2 hover:bg-white/[0.09] hover:text-rose-300"
+            >
+              <Power className="size-3.5" aria-hidden />
+              Disconnect
+            </button>
+          )}
+          {deleteBuiltinBtn('phantom', 'Solana Wallet')}
+        </>
       }
       primaryAction={
         phantom.connected ? (
@@ -479,6 +517,7 @@ export function WalletsView() {
       solUsd={b.solUsd}
       onCopy={(a) => void copyText(a)}
       onReceive={hotWallet ? () => setReceiveAddr({ label: 'Bot Trading Wallet', addr: hotWallet }) : undefined}
+      secondaryAction={deleteBuiltinBtn('bot', 'Bot Trading Wallet')}
       primaryAction={
         <Link
           href="/settings#wallets"
@@ -506,6 +545,7 @@ export function WalletsView() {
       solUsd={b.solUsd}
       onCopy={(a) => void copyText(a)}
       onReceive={hotWallet ? () => setReceiveAddr({ label: 'USDC Wallet (SPL)', addr: hotWallet }) : undefined}
+      secondaryAction={deleteBuiltinBtn('usdc', 'USDC Wallet')}
       primaryAction={
         <Link
           href="/treasury"
@@ -529,6 +569,15 @@ export function WalletsView() {
         }
         actions={
           <>
+            {hiddenBuiltins.length > 0 && (
+              <button
+                type="button"
+                onClick={restoreBuiltins}
+                className="inline-flex h-10 items-center gap-2 rounded-full border border-amber-400/30 bg-amber-400/10 px-4 text-sm font-medium text-amber-200 transition-colors hover:bg-amber-400/20"
+              >
+                Restore Wallets ({hiddenBuiltins.length})
+              </button>
+            )}
             <button
               type="button"
               onClick={() => void loadWallets()}
@@ -561,17 +610,17 @@ export function WalletsView() {
       <div className="grid gap-5">
         {isShadow ? (
           <>
-            {shadowCard}
-            {phantomCard}
-            {botCard}
-            {usdcCard}
+            {!hiddenBuiltins.includes('shadow') && shadowCard}
+            {!hiddenBuiltins.includes('phantom') && phantomCard}
+            {!hiddenBuiltins.includes('bot') && botCard}
+            {!hiddenBuiltins.includes('usdc') && usdcCard}
           </>
         ) : (
           <>
-            {phantomCard}
-            {botCard}
-            {usdcCard}
-            {shadowCard}
+            {!hiddenBuiltins.includes('phantom') && phantomCard}
+            {!hiddenBuiltins.includes('bot') && botCard}
+            {!hiddenBuiltins.includes('usdc') && usdcCard}
+            {!hiddenBuiltins.includes('shadow') && shadowCard}
           </>
         )}
 
@@ -600,32 +649,32 @@ export function WalletsView() {
                     solUsd={b.solUsd}
                     onCopy={(a) => void copyText(a)}
                     onReceive={() => setReceiveAddr({ label: w.label, addr: w.pubkey })}
-                    secondaryAction={
-                      <button
-                        type="button"
-                        onClick={() => setRemoveTarget(w)}
-                        className="inline-flex h-8 items-center gap-1.5 rounded-full border border-rose-500/25 bg-rose-500/10 px-3 text-xs font-medium text-rose-300 transition-colors hover:bg-rose-500/20"
-                      >
-                        <Trash2 className="size-3.5" aria-hidden />
-                        Remove
-                      </button>
-                    }
                     primaryAction={
-                      isBotActive ? (
-                        <span className="inline-flex h-10 items-center gap-1.5 rounded-full border border-emerald-400/30 bg-emerald-400/10 px-4 text-sm font-semibold text-emerald-300">
-                          <Check className="size-4" aria-hidden />
-                          Active Hot Wallet
-                        </span>
-                      ) : (
+                      <>
+                        {isBotActive ? (
+                          <span className="inline-flex h-10 items-center gap-1.5 rounded-full border border-emerald-400/30 bg-emerald-400/10 px-4 text-sm font-semibold text-emerald-300">
+                            <Check className="size-4" aria-hidden />
+                            Active Hot Wallet
+                          </span>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => void handleSetHotWallet(w)}
+                            className="inline-flex h-10 items-center gap-2 rounded-full border border-white/10 bg-white/[0.06] px-4 text-sm font-semibold text-fg transition-colors hover:bg-white/[0.12]"
+                          >
+                            <Wallet className="size-4" aria-hidden />
+                            Set as Bot Wallet
+                          </button>
+                        )}
                         <button
                           type="button"
-                          onClick={() => void handleSetHotWallet(w)}
-                          className="inline-flex h-10 items-center gap-2 rounded-full border border-white/10 bg-white/[0.06] px-4 text-sm font-semibold text-fg transition-colors hover:bg-white/[0.12]"
+                          onClick={() => setRemoveTarget(w)}
+                          className="inline-flex h-10 items-center gap-2 rounded-full border border-rose-500/30 bg-rose-500/12 px-4 text-sm font-semibold text-rose-300 transition-colors hover:bg-rose-500/22"
                         >
-                          <Wallet className="size-4" aria-hidden />
-                          Set as Bot Wallet
+                          <Trash2 className="size-4" aria-hidden />
+                          Delete
                         </button>
-                      )
+                      </>
                     }
                   />
                 );
@@ -767,19 +816,34 @@ export function WalletsView() {
         )}
       </Modal>
 
-      {/* Remove Wallet confirmation modal */}
-      <Modal open={!!removeTarget} onClose={() => setRemoveTarget(null)} title={`Remove Wallet · ${removeTarget?.label ?? ''}`}>
+      {/* Delete Custom Wallet confirmation modal */}
+      <Modal open={!!removeTarget} onClose={() => setRemoveTarget(null)} title={`Delete Wallet · ${removeTarget?.label ?? ''}`}>
         <div className="space-y-4 text-sm">
           <p className="text-fg2">
-            Remove <b className="text-fg">{removeTarget?.label}</b> (<code className="num text-xs">{removeTarget ? shortKey(removeTarget.pubkey, 6) : ''}</code>) from your Wallets list?
+            Permanently delete <b className="text-fg">{removeTarget?.label}</b> (<code className="num text-xs">{removeTarget ? shortKey(removeTarget.pubkey, 6) : ''}</code>) from your Wallets list?
           </p>
           <p className="text-xs text-muted">
-            This only removes the wallet from Whal Bot. Your on-chain funds remain safe as long as you have your private key backed up.
+            Make sure you have backed up your private key before deleting. Your on-chain funds remain on Solana.
           </p>
           <div className="flex justify-end gap-2 pt-1">
             <Button onClick={() => setRemoveTarget(null)}>Cancel</Button>
             <Button variant="danger" icon={Trash2} disabled={submitting} onClick={() => void handleRemoveWallet()}>
-              {submitting ? 'Removing…' : 'Remove Wallet'}
+              {submitting ? 'Deleting…' : 'Delete Wallet'}
+            </Button>
+          </div>
+        </div>
+      </Modal>
+
+      {/* Delete Built-in Wallet card confirmation modal */}
+      <Modal open={!!hideBuiltinTarget} onClose={() => setHideBuiltinTarget(null)} title={`Delete Wallet · ${hideBuiltinTarget?.label ?? ''}`}>
+        <div className="space-y-4 text-sm">
+          <p className="text-fg2">
+            Remove <b className="text-fg">{hideBuiltinTarget?.label}</b> from your Wallets page? You can restore default wallets anytime from the header.
+          </p>
+          <div className="flex justify-end gap-2 pt-1">
+            <Button onClick={() => setHideBuiltinTarget(null)}>Cancel</Button>
+            <Button variant="danger" icon={Trash2} onClick={() => hideBuiltinTarget && hideBuiltin(hideBuiltinTarget.id, hideBuiltinTarget.label)}>
+              Delete Wallet
             </Button>
           </div>
         </div>
