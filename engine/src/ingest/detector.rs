@@ -129,18 +129,7 @@ fn build_local_pumpfun_buy_accounts(
     );
     let fee_recipient = pick(1, if is_mayhem { PUMP_FEE_MAYHEM } else { PUMP_FEE_STD });
     let assoc_curve = pick(4, find_pda(&[&bonding_curve, &token_prog, &mint], &ATA_PROGRAM_ID));
-    // On 27-account 2026 BuyV2/BuyExactQuoteInV2 layouts ([1]==mint, [2]==WSOL), Pump.fun puts
-    // the exact on-chain creator_vault (including fee-sharing/cashback PDAs!) at index [16].
-    let is_v2_27_layout = bundled_buy_accounts.len() >= 26
-        && bundled_buy_accounts.get(1) == Some(&mint)
-        && bundled_buy_accounts.get(2) == Some(&WSOL_MINT);
-    let v2_creator_vault = if is_v2_27_layout {
-        bundled_buy_accounts.get(16).copied().filter(|k| *k != [0u8; 32])
-    } else {
-        None
-    };
-    let creator_vault = v2_creator_vault
-        .unwrap_or_else(|| pick(9, find_pda(&[b"creator-vault", &creator], &PUMPFUN_PROGRAM_ID)));
+    let creator_vault = pick(9, find_pda(&[b"creator-vault", &creator], &PUMPFUN_PROGRAM_ID));
     let bc_v2 = pick(16, find_pda(&[b"bonding-curve-v2", &mint], &PUMPFUN_PROGRAM_ID));
     vec![
         PUMP_GLOBAL,        // [0] global
