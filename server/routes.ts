@@ -1,5 +1,5 @@
 // REST endpoints. Every mutating route is authenticated, rate limited and audited (in ControlPlane).
-import { timingSafeEqual } from 'node:crypto';
+import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { z } from 'zod';
 import { toJsonSchema } from '../lib/config/schema';
 import { ConfigPut, ControlInput, KolInput, KolPatch, NonceInput, SellInput, parse, type ControlPlane } from './control';
@@ -8,9 +8,15 @@ import type { Env } from './env';
 import { HttpError, type Ctx, type Route } from './http';
 import { buildObserverReport } from './observer';
 import { signJwt, verifyOperatorToken } from './security';
+import { fetchSolBalances, generateSolanaKeypair, parseWalletInput } from './wallets';
 
 const LoginInput = z.object({ token: z.string().min(16, 'Operator token is too short').max(512) }).strict();
 const SecretInput = z.object({ value: z.string().min(1).max(16_384) }).strict();
+const WalletGenerateInput = z.object({ label: z.string().trim().min(1, 'Label is required').max(48) }).strict();
+const WalletAddInput = z.object({
+  label: z.string().trim().min(1, 'Label is required').max(48),
+  pubkeyOrSecret: z.string().trim().min(32, 'Enter a valid Solana address or private key').max(1024),
+}).strict();
 const actor = (c: Ctx) => ({ actor: c.actor, ip: c.ip });
 
 export function routes(env: Env, db: Db, cp: ControlPlane): Route[] {
@@ -88,6 +94,45 @@ export function routes(env: Env, db: Db, cp: ControlPlane): Route[] {
     // ---------- nonces ----------
     { method: 'GET', path: '/api/nonces', auth: true, limit: 'read', handler: () => cp.nonces() },
     { method: 'POST', path: '/api/nonces', auth: true, limit: 'write', handler: (c) => cp.nonce(parse(NonceInput, c.body), actor(c)) },
+
+    // ---------- custom wallets ----------
+    { method: 'GET', path: '/api/wallets', auth: true, limit: 'read', handler: async () => {
+      const rows = db.listWallets();
+      const rpcUrl = process.env.SOLANA_RPC_URL || cp.configState().config.network.rpc_primary_url || 'https://api.mainnet-beta.solana.com';
+      const bals = await fetchSolBalances(rpcUrl, rows.map((w) => w.pubkey));
+      return { items: rows.map((w) => ({ ...w, sol: bals[w.pubkey] ?? 0 })) };
+    } },
+    { method: 'POST', path: '/api/wallets/generate', auth: true, limit: 'write', handler: (c) => {
+      const { label } = parse(WalletGenerateInput, c.body);
+      const kp = generateSolanaKeypair();
+      const wallet = { id: kp.id, label, pubkey: kp.pubkey, kind: 'generated' as const, createdAt: Date.now() };
+      db.insertWallet(wallet);
+      db.audit({ ...actor(c), action: 'wallet.generate', target: wallet.id, detail: { label, pubkey: wallet.pubkey } });
+      c.res.statusCode = 201;
+      return { wallet: { ...wallet, sol: 0 }, secretKeyBase58: kp.secretKeyBase58, secretKeyArray: kp.secretKeyArray };
+    } },
+    { method: 'POST', path: '/api/wallets', auth: true, limit: 'write', handler: async (c) => {
+      const { label, pubkeyOrSecret } = parse(WalletAddInput, c.body);
+      let parsed: { pubkey: string; kind: 'watch' | 'imported' };
+      try { parsed = parseWalletInput(pubkeyOrSecret); }
+      catch (e) { throw new HttpError(400, (e as Error).message); }
+      if (db.listWallets().some((w) => w.pubkey === parsed.pubkey)) {
+        throw new HttpError(409, 'A wallet with this Solana address is already added');
+      }
+      const wallet = { id: `wal_${randomUUID().slice(0, 10)}`, label, pubkey: parsed.pubkey, kind: parsed.kind, createdAt: Date.now() };
+      db.insertWallet(wallet);
+      db.audit({ ...actor(c), action: 'wallet.add', target: wallet.id, detail: { label, pubkey: wallet.pubkey, kind: wallet.kind } });
+      const rpcUrl = process.env.SOLANA_RPC_URL || cp.configState().config.network.rpc_primary_url || 'https://api.mainnet-beta.solana.com';
+      const bals = await fetchSolBalances(rpcUrl, [wallet.pubkey]);
+      c.res.statusCode = 201;
+      return { wallet: { ...wallet, sol: bals[wallet.pubkey] ?? 0 } };
+    } },
+    { method: 'DELETE', path: '/api/wallets/:id', auth: true, limit: 'write', handler: (c) => {
+      const ok = db.deleteWallet(c.params.id);
+      if (!ok) throw new HttpError(404, 'Wallet not found');
+      db.audit({ ...actor(c), action: 'wallet.remove', target: c.params.id, detail: null });
+      return { ok: true };
+    } },
 
     // ---------- audit ----------
     { method: 'GET', path: '/api/audit', auth: true, limit: 'read', handler: (c) => {

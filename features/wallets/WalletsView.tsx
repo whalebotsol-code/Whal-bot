@@ -1,15 +1,47 @@
 'use client';
 
-import { useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import Link from 'next/link';
-import { ArrowUpRight, Copy, Download, Eye, Pencil, Power, Settings, Wallet } from '@/components/icons';
+import { ArrowUpRight, Check, Copy, Download, Eye, Lock, Pencil, Plus, Power, RefreshCw, Settings, Trash2, TriangleAlert, Wallet, Zap } from '@/components/icons';
 import { Button, Modal, PageHeader, cx } from '@/components/ui';
 import { fmtSol, fmtUsd, shortKey } from '@/lib/format';
 import { computePaperEquitySol, usePaperBalance } from '@/lib/paper';
 import { usePhantom } from '@/lib/phantom';
-import { useTerminal } from '@/lib/store';
+import { API_URL, useTerminal } from '@/lib/store';
 
 const PAPER_PRESETS = [5, 10, 25, 100];
+
+interface CustomWallet {
+  id: string;
+  label: string;
+  pubkey: string;
+  kind: 'generated' | 'imported' | 'watch';
+  createdAt: number;
+  sol: number;
+}
+
+interface GeneratedSecret {
+  wallet: CustomWallet;
+  secretKeyBase58: string;
+  secretKeyArray: number[];
+}
+
+async function walletApi<T>(method: 'GET' | 'POST' | 'DELETE', path: string, body?: unknown): Promise<T> {
+  const jwt = typeof window !== 'undefined' ? sessionStorage.getItem('whal.jwt') : null;
+  const r = await fetch(`${API_URL}${path}`, {
+    method,
+    headers: {
+      ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}),
+      ...(jwt ? { Authorization: `Bearer ${jwt}` } : {}),
+    },
+    body: body !== undefined ? JSON.stringify(body) : undefined,
+  });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) {
+    throw new Error((data as { error?: string; message?: string }).error || (data as { message?: string }).message || `HTTP ${r.status}`);
+  }
+  return data as T;
+}
 
 function SolanaMark({ className = 'size-5' }: { className?: string }) {
   return (
@@ -193,12 +225,44 @@ function WalletCard({
 }
 
 export function WalletsView() {
-  const { state, toast } = useTerminal();
+  const { state, send, toast } = useTerminal();
   const phantom = usePhantom();
   const [paperStartSol, setPaperStartSol] = usePaperBalance();
   const [receiveAddr, setReceiveAddr] = useState<{ label: string; addr: string } | null>(null);
   const [paperModal, setPaperModal] = useState(false);
   const [paperInput, setPaperInput] = useState<string>(String(paperStartSol));
+
+  // Multi-wallet management state
+  const [customWallets, setCustomWallets] = useState<CustomWallet[]>([]);
+  const [loadingWallets, setLoadingWallets] = useState(false);
+  const [addModal, setAddModal] = useState(false);
+  const [addLabel, setAddLabel] = useState('');
+  const [addKeyInput, setAddKeyInput] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+
+  const [genModal, setGenModal] = useState(false);
+  const [genLabel, setGenLabel] = useState('');
+  const [generated, setGenerated] = useState<GeneratedSecret | null>(null);
+  const [revealSecret, setRevealSecret] = useState(false);
+  const [copiedSecret, setCopiedSecret] = useState(false);
+
+  const [removeTarget, setRemoveTarget] = useState<CustomWallet | null>(null);
+
+  const loadWallets = useCallback(async () => {
+    setLoadingWallets(true);
+    try {
+      const res = await walletApi<{ items: CustomWallet[] }>('GET', '/api/wallets');
+      setCustomWallets(res.items ?? []);
+    } catch {
+      /* ignore before auth ready */
+    } finally {
+      setLoadingWallets(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadWallets();
+  }, [loadWallets]);
 
   const savePaperBalance = (val: number) => {
     if (!Number.isFinite(val) || val < 0 || val > 1_000_000) {
@@ -220,9 +284,91 @@ export function WalletsView() {
   const paperOpenVal = paperOpen.reduce((a, p) => a + p.tokens * p.price, 0);
   const paperEquitySol = computePaperEquitySol(state, paperStartSol);
 
-  const copyAddr = async (addr: string) => {
-    try { await navigator.clipboard.writeText(addr); toast('Address copied', 'ok'); }
+  const copyText = async (text: string, label = 'Address copied') => {
+    try { await navigator.clipboard.writeText(text); toast(label, 'ok'); }
     catch { toast('Copy failed', 'error'); }
+  };
+
+  const handleAddWallet = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!addLabel.trim() || !addKeyInput.trim()) return;
+    setSubmitting(true);
+    try {
+      const res = await walletApi<{ wallet: CustomWallet }>('POST', '/api/wallets', {
+        label: addLabel.trim(),
+        pubkeyOrSecret: addKeyInput.trim(),
+      });
+      setCustomWallets((prev) => [res.wallet, ...prev]);
+      setAddModal(false);
+      setAddLabel('');
+      setAddKeyInput('');
+      toast(`Added wallet "${res.wallet.label}" (${shortKey(res.wallet.pubkey, 4)})`, 'ok');
+    } catch (err) {
+      toast((err as Error).message || 'Failed to add wallet', 'error');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const handleGenerateWallet = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!genLabel.trim()) return;
+    setSubmitting(true);
+    try {
+      const res = await walletApi<GeneratedSecret>('POST', '/api/wallets/generate', {
+        label: genLabel.trim(),
+      });
+      setCustomWallets((prev) => [res.wallet, ...prev]);
+      setGenerated(res);
+      setRevealSecret(false);
+      setCopiedSecret(false);
+      toast(`Generated new Solana wallet "${res.wallet.label}"`, 'ok');
+    } catch (err) {
+      toast((err as Error).message || 'Failed to generate wallet', 'error');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const handleRemoveWallet = async () => {
+    if (!removeTarget) return;
+    setSubmitting(true);
+    try {
+      await walletApi<{ ok: boolean }>('DELETE', `/api/wallets/${encodeURIComponent(removeTarget.id)}`);
+      setCustomWallets((prev) => prev.filter((w) => w.id !== removeTarget.id));
+      toast(`Removed wallet "${removeTarget.label}"`, 'info');
+      setRemoveTarget(null);
+    } catch (err) {
+      toast((err as Error).message || 'Failed to remove wallet', 'error');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const handleSetHotWallet = async (w: CustomWallet) => {
+    if (!state.config) {
+      toast('Config not loaded yet', 'error');
+      return;
+    }
+    try {
+      const nextCfg = structuredClone(state.config.config);
+      nextCfg.wallets.hot_wallet_pubkey = w.pubkey;
+      await send({ type: 'config.update', baseVersion: state.config.version, config: nextCfg });
+      toast(`Hot wallet pubkey updated to ${w.label} (${shortKey(w.pubkey, 4)})`, 'ok');
+    } catch (err) {
+      toast((err as Error).message || 'Failed to update hot wallet', 'error');
+    }
+  };
+
+  const downloadKeypairJson = (gen: GeneratedSecret) => {
+    const blob = new Blob([JSON.stringify(gen.secretKeyArray)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${gen.wallet.label.toLowerCase().replace(/[^a-z0-9]+/g, '-') || 'solana-wallet'}-${gen.wallet.pubkey.slice(0, 6)}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+    toast('Downloaded Solana keypair JSON', 'ok');
   };
 
   const shadowCard = (
@@ -238,7 +384,7 @@ export function WalletsView() {
       sol={paperEquitySol}
       usdc={0}
       solUsd={b.solUsd}
-      onCopy={copyAddr}
+      onCopy={(a) => void copyText(a)}
       secondaryAction={
         <Link
           href="/?tab=positions"
@@ -271,7 +417,7 @@ export function WalletsView() {
       sol={phantom.solBalance ?? 0}
       usdc={0}
       solUsd={b.solUsd}
-      onCopy={copyAddr}
+      onCopy={(a) => void copyText(a)}
       onReceive={phantom.publicKey ? () => setReceiveAddr({ label: 'Phantom Wallet', addr: phantom.publicKey! }) : undefined}
       secondaryAction={
         phantom.connected ? (
@@ -331,7 +477,7 @@ export function WalletsView() {
       sol={b.sol + b.wsol}
       usdc={b.usdc}
       solUsd={b.solUsd}
-      onCopy={copyAddr}
+      onCopy={(a) => void copyText(a)}
       onReceive={hotWallet ? () => setReceiveAddr({ label: 'Bot Trading Wallet', addr: hotWallet }) : undefined}
       primaryAction={
         <Link
@@ -358,7 +504,7 @@ export function WalletsView() {
       sol={0}
       usdc={b.usdc}
       solUsd={b.solUsd}
-      onCopy={copyAddr}
+      onCopy={(a) => void copyText(a)}
       onReceive={hotWallet ? () => setReceiveAddr({ label: 'USDC Wallet (SPL)', addr: hotWallet }) : undefined}
       primaryAction={
         <Link
@@ -379,7 +525,36 @@ export function WalletsView() {
         sub={
           isShadow
             ? 'Paper Mode is ON — Paper Wallet is active for all simulated trades.'
-            : 'Connected Phantom browser wallet, engine hot trading wallet, and USDC treasury on Solana mainnet.'
+            : 'Connected Phantom browser wallet, engine hot trading wallet, and custom Solana wallets on mainnet.'
+        }
+        actions={
+          <>
+            <button
+              type="button"
+              onClick={() => void loadWallets()}
+              disabled={loadingWallets}
+              className="inline-flex h-10 items-center gap-2 rounded-full border border-white/10 bg-white/[0.04] px-4 text-sm font-medium text-fg transition-colors hover:bg-white/[0.09] disabled:opacity-50"
+            >
+              <RefreshCw className={cx('size-4 text-fg2', loadingWallets && 'animate-spin')} aria-hidden />
+              Refresh
+            </button>
+            <button
+              type="button"
+              onClick={() => { setAddLabel(''); setAddKeyInput(''); setAddModal(true); }}
+              className="inline-flex h-10 items-center gap-2 rounded-full border border-white/10 bg-white/[0.06] px-4 text-sm font-semibold text-fg transition-colors hover:bg-white/[0.12]"
+            >
+              <Plus className="size-4" aria-hidden />
+              Add Wallet
+            </button>
+            <button
+              type="button"
+              onClick={() => { setGenLabel(`Wallet #${customWallets.length + 1}`); setGenerated(null); setGenModal(true); }}
+              className="inline-flex h-10 items-center gap-2 rounded-full bg-[#6c75f5] px-5 text-sm font-semibold text-white transition-colors hover:bg-[#7c84ff]"
+            >
+              <Zap className="size-4" aria-hidden />
+              Generate Wallet
+            </button>
+          </>
         }
       />
 
@@ -399,14 +574,223 @@ export function WalletsView() {
             {shadowCard}
           </>
         )}
+
+        {customWallets.length > 0 && (
+          <div className="mt-2 space-y-4">
+            <div className="flex items-center justify-between">
+              <h2 className="text-sm font-semibold uppercase tracking-wider text-fg2">
+                My Wallets ({customWallets.length})
+              </h2>
+            </div>
+            <div className="grid gap-5">
+              {customWallets.map((w) => {
+                const isBotActive = hotWallet === w.pubkey;
+                const kindLabel = w.kind === 'generated' ? 'Generated' : w.kind === 'imported' ? 'Imported' : 'Watch-Only';
+                return (
+                  <WalletCard
+                    key={w.id}
+                    title={w.label}
+                    badge={isBotActive ? '● Bot Hot Wallet' : kindLabel}
+                    badgeTone={isBotActive ? 'emerald' : w.kind === 'generated' ? 'sky' : 'amber'}
+                    activeHighlight={isBotActive}
+                    providerLabel={w.kind === 'generated' ? 'Ed25519 Keypair' : w.kind === 'imported' ? 'Imported Key' : 'Watched Address'}
+                    address={w.pubkey}
+                    sol={w.sol}
+                    usdc={0}
+                    solUsd={b.solUsd}
+                    onCopy={(a) => void copyText(a)}
+                    onReceive={() => setReceiveAddr({ label: w.label, addr: w.pubkey })}
+                    secondaryAction={
+                      <button
+                        type="button"
+                        onClick={() => setRemoveTarget(w)}
+                        className="inline-flex h-8 items-center gap-1.5 rounded-full border border-rose-500/25 bg-rose-500/10 px-3 text-xs font-medium text-rose-300 transition-colors hover:bg-rose-500/20"
+                      >
+                        <Trash2 className="size-3.5" aria-hidden />
+                        Remove
+                      </button>
+                    }
+                    primaryAction={
+                      isBotActive ? (
+                        <span className="inline-flex h-10 items-center gap-1.5 rounded-full border border-emerald-400/30 bg-emerald-400/10 px-4 text-sm font-semibold text-emerald-300">
+                          <Check className="size-4" aria-hidden />
+                          Active Hot Wallet
+                        </span>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => void handleSetHotWallet(w)}
+                          className="inline-flex h-10 items-center gap-2 rounded-full border border-white/10 bg-white/[0.06] px-4 text-sm font-semibold text-fg transition-colors hover:bg-white/[0.12]"
+                        >
+                          <Wallet className="size-4" aria-hidden />
+                          Set as Bot Wallet
+                        </button>
+                      )
+                    }
+                  />
+                );
+              })}
+            </div>
+          </div>
+        )}
       </div>
+
+      {/* Add Existing Wallet modal */}
+      <Modal open={addModal} onClose={() => setAddModal(false)} title="Add Solana Wallet">
+        <form className="space-y-4 text-sm" onSubmit={(e) => void handleAddWallet(e)}>
+          <p className="text-fg2">
+            Paste a Solana public address (watch-only) or a Base58 / JSON private key to import its public address. Private keys are <b className="text-fg">never stored</b> in the database.
+          </p>
+          <div>
+            <label htmlFor="add-wallet-label" className="text-xs font-medium text-fg2">Wallet Label</label>
+            <input
+              id="add-wallet-label"
+              type="text"
+              required
+              maxLength={48}
+              placeholder="e.g. Sniper #2, Profit Vault"
+              data-autofocus
+              value={addLabel}
+              onChange={(e) => setAddLabel(e.target.value)}
+              className="mt-1.5 h-10 w-full rounded-xl border border-line2 bg-card px-3.5 text-sm text-fg outline-none focus:border-accent"
+            />
+          </div>
+          <div>
+            <label htmlFor="add-wallet-key" className="text-xs font-medium text-fg2">Solana Address or Private Key (Base58 / JSON)</label>
+            <textarea
+              id="add-wallet-key"
+              required
+              rows={3}
+              placeholder="Paste public key (44 chars) or private key…"
+              value={addKeyInput}
+              onChange={(e) => setAddKeyInput(e.target.value)}
+              className="num mt-1.5 w-full rounded-xl border border-line2 bg-card p-3 text-xs text-fg outline-none focus:border-accent"
+            />
+          </div>
+          <div className="flex justify-end gap-2 pt-1">
+            <Button onClick={() => setAddModal(false)}>Cancel</Button>
+            <Button type="submit" variant="primary" disabled={submitting}>
+              {submitting ? 'Adding…' : 'Add Wallet'}
+            </Button>
+          </div>
+        </form>
+      </Modal>
+
+      {/* Generate New Solana Wallet modal */}
+      <Modal
+        open={genModal}
+        onClose={() => { setGenModal(false); setGenerated(null); }}
+        title={generated ? `Save Private Key · ${generated.wallet.label}` : 'Generate New Solana Wallet'}
+      >
+        {!generated ? (
+          <form className="space-y-4 text-sm" onSubmit={(e) => void handleGenerateWallet(e)}>
+            <p className="text-fg2">
+              Creates a brand-new cryptographically secure <b className="text-fg">Ed25519 Solana keypair</b> compatible with Phantom, Solflare, and the Whal Bot engine.
+            </p>
+            <div>
+              <label htmlFor="gen-wallet-label" className="text-xs font-medium text-fg2">Wallet Label</label>
+              <input
+                id="gen-wallet-label"
+                type="text"
+                required
+                maxLength={48}
+                placeholder="e.g. Trading Wallet #2"
+                data-autofocus
+                value={genLabel}
+                onChange={(e) => setGenLabel(e.target.value)}
+                className="mt-1.5 h-10 w-full rounded-xl border border-line2 bg-card px-3.5 text-sm text-fg outline-none focus:border-accent"
+              />
+            </div>
+            <div className="flex justify-end gap-2 pt-1">
+              <Button onClick={() => setGenModal(false)}>Cancel</Button>
+              <Button type="submit" variant="primary" icon={Zap} disabled={submitting}>
+                {submitting ? 'Generating…' : 'Generate Keypair'}
+              </Button>
+            </div>
+          </form>
+        ) : (
+          <div className="space-y-4 text-sm">
+            <div className="flex items-start gap-2.5 rounded-xl border border-amber-400/35 bg-amber-400/10 p-3 text-xs text-amber-200">
+              <TriangleAlert className="mt-0.5 size-4 shrink-0 text-amber-300" aria-hidden />
+              <span>
+                <b>Save this private key now!</b> For security, it is shown <b>once only</b> and never saved to the server database. Anyone with this key controls the wallet.
+              </span>
+            </div>
+
+            <div>
+              <div className="text-xs font-medium text-fg2">Public Address (Solana)</div>
+              <div className="mt-1.5 flex items-center justify-between gap-2 rounded-xl border border-line2 bg-card px-3 py-2.5">
+                <code className="num break-all text-xs text-fg">{generated.wallet.pubkey}</code>
+                <Button size="sm" variant="ghost" icon={Copy} onClick={() => void copyText(generated.wallet.pubkey, 'Public address copied')}>Copy</Button>
+              </div>
+            </div>
+
+            <div>
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-medium text-fg2">Private Key (Base58 · Phantom / Solflare)</span>
+                <button
+                  type="button"
+                  onClick={() => setRevealSecret((v) => !v)}
+                  className="inline-flex items-center gap-1 text-xs font-medium text-accent hover:underline"
+                >
+                  {revealSecret ? <Lock className="size-3" /> : <Eye className="size-3" />}
+                  {revealSecret ? 'Hide' : 'Reveal'}
+                </button>
+              </div>
+              <div className="mt-1.5 flex items-center justify-between gap-2 rounded-xl border border-line2 bg-card px-3 py-2.5">
+                <code className="num break-all text-xs text-fg">
+                  {revealSecret ? generated.secretKeyBase58 : '••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••'}
+                </code>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  icon={copiedSecret ? Check : Copy}
+                  onClick={() => {
+                    void copyText(generated.secretKeyBase58, 'Private key copied');
+                    setCopiedSecret(true);
+                  }}
+                >
+                  {copiedSecret ? 'Copied' : 'Copy'}
+                </Button>
+              </div>
+            </div>
+
+            <div className="flex flex-wrap items-center justify-between gap-2 pt-2">
+              <Button icon={Download} onClick={() => downloadKeypairJson(generated)}>
+                Download .json Keypair
+              </Button>
+              <Button variant="primary" onClick={() => { setGenModal(false); setGenerated(null); }}>
+                I Saved My Private Key
+              </Button>
+            </div>
+          </div>
+        )}
+      </Modal>
+
+      {/* Remove Wallet confirmation modal */}
+      <Modal open={!!removeTarget} onClose={() => setRemoveTarget(null)} title={`Remove Wallet · ${removeTarget?.label ?? ''}`}>
+        <div className="space-y-4 text-sm">
+          <p className="text-fg2">
+            Remove <b className="text-fg">{removeTarget?.label}</b> (<code className="num text-xs">{removeTarget ? shortKey(removeTarget.pubkey, 6) : ''}</code>) from your Wallets list?
+          </p>
+          <p className="text-xs text-muted">
+            This only removes the wallet from Whal Bot. Your on-chain funds remain safe as long as you have your private key backed up.
+          </p>
+          <div className="flex justify-end gap-2 pt-1">
+            <Button onClick={() => setRemoveTarget(null)}>Cancel</Button>
+            <Button variant="danger" icon={Trash2} disabled={submitting} onClick={() => void handleRemoveWallet()}>
+              {submitting ? 'Removing…' : 'Remove Wallet'}
+            </Button>
+          </div>
+        </div>
+      </Modal>
 
       {/* Receive modal */}
       <Modal open={!!receiveAddr} onClose={() => setReceiveAddr(null)} title={`Receive SOL · ${receiveAddr?.label ?? ''}`}>
         <p className="text-sm text-fg2">Send native Solana (SOL) or SPL tokens to this address:</p>
         <div className="mt-3 flex items-center justify-between gap-2 rounded-xl border border-line2 bg-card px-3 py-2.5">
           <code className="num break-all text-xs text-fg">{receiveAddr?.addr}</code>
-          {receiveAddr && <Button size="sm" variant="ghost" icon={Copy} onClick={() => void copyAddr(receiveAddr.addr)}>Copy</Button>}
+          {receiveAddr && <Button size="sm" variant="ghost" icon={Copy} onClick={() => void copyText(receiveAddr.addr)}>Copy</Button>}
         </div>
         <div className="mt-4 flex justify-end"><Button onClick={() => setReceiveAddr(null)}>Close</Button></div>
       </Modal>

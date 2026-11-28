@@ -39,12 +39,16 @@ CREATE TABLE IF NOT EXISTS audit (
 CREATE INDEX IF NOT EXISTS audit_ts ON audit(id DESC);
 CREATE TABLE IF NOT EXISTS revoked_tokens (jti TEXT PRIMARY KEY, exp INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS wallets (
+  id TEXT PRIMARY KEY, label TEXT NOT NULL, pubkey TEXT NOT NULL UNIQUE, kind TEXT NOT NULL, created_at INTEGER NOT NULL
+);
 `;
 
 type Row = Record<string, unknown>;
 const json = <T,>(v: unknown) => JSON.parse(String(v)) as T;
 
 export type AuditEntry = { id: number; ts: number; actor: string; ip: string | null; action: string; target: string | null; detail: unknown };
+export type SavedWallet = { id: string; label: string; pubkey: string; kind: 'generated' | 'imported' | 'watch'; createdAt: number };
 
 export class Db {
   readonly raw: DatabaseSync;
@@ -191,5 +195,23 @@ export class Db {
   }
   setMeta(key: string, value: string) {
     this.raw.prepare('INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value').run(key, value);
+  }
+
+  // ---------- custom wallets ----------
+  listWallets(): SavedWallet[] {
+    return (this.raw.prepare('SELECT * FROM wallets ORDER BY created_at DESC').all() as Row[]).map((r) => ({
+      id: String(r.id),
+      label: String(r.label),
+      pubkey: String(r.pubkey),
+      kind: r.kind as SavedWallet['kind'],
+      createdAt: Number(r.created_at),
+    }));
+  }
+  insertWallet(w: SavedWallet) {
+    this.raw.prepare('INSERT INTO wallets (id, label, pubkey, kind, created_at) VALUES (?, ?, ?, ?, ?)')
+      .run(w.id, w.label, w.pubkey, w.kind, w.createdAt);
+  }
+  deleteWallet(id: string): boolean {
+    return Number(this.raw.prepare('DELETE FROM wallets WHERE id = ?').run(id).changes) > 0;
   }
 }
