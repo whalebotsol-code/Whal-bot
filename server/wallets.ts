@@ -1,5 +1,5 @@
 // Solana wallet utilities: real Ed25519 keypair generation, Base58 codec, secret-key derivation, and batched SOL balance RPC lookup.
-import { createPrivateKey, createPublicKey, generateKeyPairSync, randomUUID } from 'node:crypto';
+import { createPrivateKey, createPublicKey, generateKeyPairSync, randomUUID, timingSafeEqual } from 'node:crypto';
 
 const B58_ALPHABET = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
 const B58_MAP = new Map<string, number>([...B58_ALPHABET].map((c, i) => [c, i]));
@@ -100,6 +100,10 @@ export function parseWalletInput(raw: string): { pubkey: string; kind: 'watch' |
   const privKey = createPrivateKey({ key: Buffer.concat([ED25519_PKCS8_PREFIX, seed]), format: 'der', type: 'pkcs8' });
   const spki = createPublicKey(privKey).export({ format: 'der', type: 'spki' }) as Buffer;
   const pubBytes = spki.subarray(spki.length - 32);
+  const embeddedPub = Buffer.from(secretBytes.subarray(32, 64));
+  if (!timingSafeEqual(pubBytes, embeddedPub)) {
+    throw new Error('Invalid 64-byte Solana secret key: public key mismatch (did you paste a transaction signature?)');
+  }
   return { pubkey: b58Encode(pubBytes), kind: 'imported' };
 }
 

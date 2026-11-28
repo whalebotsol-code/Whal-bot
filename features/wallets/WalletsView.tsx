@@ -247,11 +247,18 @@ export function WalletsView() {
   const [copiedSecret, setCopiedSecret] = useState(false);
 
   const [removeTarget, setRemoveTarget] = useState<CustomWallet | null>(null);
-  const [hiddenBuiltins, setHiddenBuiltins] = useState<string[]>(() => {
-    if (typeof window === 'undefined') return [];
-    try { return JSON.parse(localStorage.getItem('whal.hiddenWallets') || '[]') as string[]; } catch { return []; }
-  });
+  const [settingHotId, setSettingHotId] = useState<string | null>(null);
+  const [hiddenBuiltins, setHiddenBuiltins] = useState<string[]>([]);
   const [hideBuiltinTarget, setHideBuiltinTarget] = useState<{ id: string; label: string } | null>(null);
+
+  useEffect(() => {
+    try {
+      const parsed: unknown = JSON.parse(localStorage.getItem('whal.hiddenWallets') || '[]');
+      if (Array.isArray(parsed)) {
+        setHiddenBuiltins(parsed.filter((x): x is string => typeof x === 'string'));
+      }
+    } catch { /* ignore malformed storage */ }
+  }, []);
 
   const hideBuiltin = (id: string, label: string) => {
     setHiddenBuiltins((prev) => {
@@ -280,21 +287,25 @@ export function WalletsView() {
     </button>
   );
 
-  const loadWallets = useCallback(async () => {
+  const loadWallets = useCallback(async (showErrors = false) => {
     setLoadingWallets(true);
     try {
       const res = await walletApi<{ items: CustomWallet[] }>('GET', '/api/wallets');
       setCustomWallets(res.items ?? []);
-    } catch {
-      /* ignore before auth ready */
+    } catch (err) {
+      if (showErrors) {
+        toast((err as Error).message || 'Failed to refresh wallets', 'error');
+      }
     } finally {
       setLoadingWallets(false);
     }
-  }, []);
+  }, [toast]);
 
   useEffect(() => {
-    void loadWallets();
-  }, [loadWallets]);
+    if (state.connection === 'open') {
+      void loadWallets(false);
+    }
+  }, [state.connection, loadWallets]);
 
   const savePaperBalance = (val: number) => {
     if (!Number.isFinite(val) || val < 0 || val > 1_000_000) {
@@ -382,13 +393,17 @@ export function WalletsView() {
       toast('Config not loaded yet', 'error');
       return;
     }
+    if (settingHotId) return;
+    setSettingHotId(w.id);
     try {
       const nextCfg = structuredClone(state.config.config);
       nextCfg.wallets.hot_wallet_pubkey = w.pubkey;
       await send({ type: 'config.update', baseVersion: state.config.version, config: nextCfg });
-      toast(`Hot wallet pubkey updated to ${w.label} (${shortKey(w.pubkey, 4)})`, 'ok');
+      toast(`Hot wallet pubkey set to ${w.label} (${shortKey(w.pubkey, 4)}) — load keypair on engine host to sign live trades`, 'ok');
     } catch (err) {
       toast((err as Error).message || 'Failed to update hot wallet', 'error');
+    } finally {
+      setSettingHotId(null);
     }
   };
 
@@ -580,7 +595,7 @@ export function WalletsView() {
             )}
             <button
               type="button"
-              onClick={() => void loadWallets()}
+              onClick={() => void loadWallets(true)}
               disabled={loadingWallets}
               className="inline-flex h-10 items-center gap-2 rounded-full border border-white/10 bg-white/[0.04] px-4 text-sm font-medium text-fg transition-colors hover:bg-white/[0.09] disabled:opacity-50"
             >
@@ -659,11 +674,12 @@ export function WalletsView() {
                         ) : (
                           <button
                             type="button"
+                            disabled={settingHotId !== null}
                             onClick={() => void handleSetHotWallet(w)}
-                            className="inline-flex h-10 items-center gap-2 rounded-full border border-white/10 bg-white/[0.06] px-4 text-sm font-semibold text-fg transition-colors hover:bg-white/[0.12]"
+                            className="inline-flex h-10 items-center gap-2 rounded-full border border-white/10 bg-white/[0.06] px-4 text-sm font-semibold text-fg transition-colors hover:bg-white/[0.12] disabled:opacity-50"
                           >
                             <Wallet className="size-4" aria-hidden />
-                            Set as Bot Wallet
+                            {settingHotId === w.id ? 'Updating…' : 'Set as Bot Wallet'}
                           </button>
                         )}
                         <button
@@ -685,7 +701,7 @@ export function WalletsView() {
       </div>
 
       {/* Add Existing Wallet modal */}
-      <Modal open={addModal} onClose={() => setAddModal(false)} title="Add Solana Wallet">
+      <Modal open={addModal} onClose={() => { setAddModal(false); setAddLabel(''); setAddKeyInput(''); }} title="Add Solana Wallet">
         <form className="space-y-4 text-sm" onSubmit={(e) => void handleAddWallet(e)}>
           <p className="text-fg2">
             Paste a Solana public address (watch-only) or a Base58 / JSON private key to import its public address. Private keys are <b className="text-fg">never stored</b> in the database.
@@ -717,7 +733,7 @@ export function WalletsView() {
             />
           </div>
           <div className="flex justify-end gap-2 pt-1">
-            <Button onClick={() => setAddModal(false)}>Cancel</Button>
+            <Button onClick={() => { setAddModal(false); setAddLabel(''); setAddKeyInput(''); }}>Cancel</Button>
             <Button type="submit" variant="primary" disabled={submitting}>
               {submitting ? 'Adding…' : 'Add Wallet'}
             </Button>
@@ -728,7 +744,13 @@ export function WalletsView() {
       {/* Generate New Solana Wallet modal */}
       <Modal
         open={genModal}
-        onClose={() => { setGenModal(false); setGenerated(null); }}
+        onClose={() => {
+          if (generated) {
+            toast('Copy or download your private key first, then click "I Saved My Private Key"', 'info');
+            return;
+          }
+          setGenModal(false);
+        }}
         title={generated ? `Save Private Key · ${generated.wallet.label}` : 'Generate New Solana Wallet'}
       >
         {!generated ? (

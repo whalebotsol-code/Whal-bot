@@ -363,12 +363,12 @@ impl TxBuilder {
                         ));
                     } else {
                         // On PumpSwap, require >= 0.05 SOL balance drop so a router-wrapped KOL SELL never triggers a buy.
-                        // On Pump.fun, cap required native-SOL drop at 0.01 SOL (10_000_000 lamports) so WSOL-funded FlashX/Axiom
-                        // KOL buys pass Shield 2 while KOL sells (paying ~0.001-0.005 SOL fee/tip) still safely revert.
-                        let effective_threshold = if trigger.venue == Venue::PumpSwap {
-                            pre_balance.saturating_sub(50_000_000)
-                        } else {
-                            balance_threshold.max(pre_balance.saturating_sub(10_000_000))
+                        // On Pump.fun, cap required native-SOL drop at 0.05 SOL (50_000_000 lamports) so fast KOL dumps paying
+                        // a ~0.01 SOL tip still safely revert while WSOL/SOL KOL buys pass Shield 2.
+                        let effective_threshold = match trigger.venue {
+                            Venue::PumpSwap => pre_balance.saturating_sub(50_000_000),
+                            Venue::PumpFun => balance_threshold.max(pre_balance.saturating_sub(50_000_000)),
+                            _ => balance_threshold,
                         };
                         ixs.push(crate::exits::assert_account_lamports_lte(
                             watched_balance_account,

@@ -499,6 +499,12 @@ impl SignalDetector {
                     let dex_accounts = if buy.venue == Venue::PumpFun
                         && buy.ix_accounts.get(2) == Some(&WSOL_MINT)
                     {
+                        let Some(&cv) = buy.ix_accounts.get(10) else {
+                            continue;
+                        };
+                        if cv == [0u8; 32] {
+                            continue;
+                        }
                         let is_t22 = buy.ix_accounts.get(3) == Some(&crate::executor::TOKEN_2022_PROGRAM_ID)
                             || buy.ix_accounts.contains(&crate::executor::TOKEN_2022_PROGRAM_ID);
                         let is_mayhem = buy.ix_accounts.contains(&PUMP_FEE_MAYHEM);
@@ -515,11 +521,7 @@ impl SignalDetector {
                                 norm[4] = abc;
                             }
                         }
-                        if let Some(&cv) = buy.ix_accounts.get(10) {
-                            if cv != [0u8; 32] {
-                                norm[9] = cv;
-                            }
-                        }
+                        norm[9] = cv;
                         norm
                     } else {
                         buy.ix_accounts
